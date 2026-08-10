@@ -60,12 +60,16 @@ def rmat_to_euler(rmat):
         sin_alpha = rmat[1,2] / np.sin(beta)
         alpha = where_is_angle(sin_alpha, cos_alpha)
     else:
-        if rmat[2,2] > 0:
-            beta = 0.0
-        else:
-            beta = np.pi
+        # Gimbal lock (sin(beta)=0): only alpha+gamma (beta=0) or alpha-gamma
+        # (beta=pi) is defined. Fix gamma=0 and recover alpha from cos/sin so the
+        # sign is kept (arccos alone folds alpha into [0,pi] and drops it).
         gamma = 0.0
-        alpha = np.arccos(rmat[1,1])
+        if rmat[2,2] > 0:      # beta = 0,  R = Rz(alpha):        [0,0]=cos, [1,0]=sin
+            beta = 0.0
+            alpha = where_is_angle(rmat[1,0], rmat[0,0])
+        else:                  # beta = pi, R = Rz(alpha)Ry(pi): [0,0]=-cos, [1,0]=-sin
+            beta = np.pi
+            alpha = where_is_angle(-rmat[1,0], -rmat[0,0])
     return alpha, beta, gamma
 
 def where_is_angle(sina, cosa):

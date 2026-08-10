@@ -72,11 +72,14 @@ def gather(obj, root, comm=comm):
 #     else:
 #         recvobj = sendobj
 #
-# def Allreduce(sendobj, recvobj, op=None, comm=comm):
-#     if comm is not None and comm.size > 1:
-#         comm.Allreduce(sendobj, recvobj, op=(op or MPI.SUM))
-#     else:
-#         recvobj = sendobj
+def Allreduce(sendobj, op=None, comm=comm):
+    from numpy import zeros_like
+    if comm is not None and comm.size > 1:
+        recvobj = zeros_like(sendobj)
+        comm.Allreduce(sendobj, recvobj, op=(op or MPI.SUM))
+        return recvobj
+    else:
+        return sendobj
 #
 # def Gather(sendobj, recvobj, root, comm=comm):
 #     if comm is not None and comm.size > 1:
