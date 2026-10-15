@@ -1,0 +1,79 @@
+# Co3Sn2S2 SOC-FM Wannier TB  (same physics as examples/co3sn2s2_udmft.py)
+#   mpirun -np N python /path/to/swept/run.py co3sn2s2.toml
+# Index convention: [shell] start = 0-based orbital index in the hr file.
+
+[model]
+hr_file = "co3sn2s2_hr.dat"
+spin    = "spinor"          # none | doubled | collinear | spinor
+eshift  = -12.5776          # eV, puts E_F at 0
+# hr_dn       = "xxx_dn_hr.dat"   # spin = "collinear" only
+# magmom_axis = [0, 0, 1]         # spin = "collinear" only
+# allow_extra_soc = false         # spin = "spinor" only
+
+[lattice]
+# rows = a1, a2, a3 (Angstrom), the cell of the Wannier calculation
+# a = 5.3689, c = 13.176 ; a1 = (a/2, a*sqrt(3)/6, c/3) ...
+rvec = [
+    [ 2.68445,  1.5498679301260907, 4.392],
+    [-2.68445,  1.5498679301260907, 4.392],
+    [ 0.0,     -3.0997358602521814, 4.392],
+]
+
+# name = { start, l [, z, x] }; z/x = local spin quantisation frame,
+# rotate_spin is applied to the shells that give them
+[shell]
+Co1_d = { start = 0,  l = 2, z = [0, 0, 1],  x = [ 0.8660254038,  0.5, 0] }
+Co2_d = { start = 10, l = 2, z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
+Co3_d = { start = 20, l = 2, z = [0, 0, 1],  x = [ 0.0,          -1.0, 0] }
+Sn1_s = { start = 30, l = 0 }
+Sn1_p = { start = 32, l = 1, z = [0, 0, 1],  x = [1, 0, 0] }
+Sn2_s = { start = 38, l = 0 }
+Sn2_p = { start = 40, l = 1, z = [0, 0, 1],  x = [1, 0, 0] }
+S1_p  = { start = 46, l = 1, z = [0, 0, -1], x = [ 0.8660254038, -0.5, 0] }
+S2_p  = { start = 52, l = 1, z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
+
+# [soc]                     # shell name = zeta (eV); not for a spinor hr
+# Co1_d = 0.07
+
+[projection]
+Co_d        = { shells = ["Co1_d", "Co2_d", "Co3_d"] }
+Co_dx2y2_up = { shells = ["Co1_d", "Co2_d", "Co3_d"], orbitals = ["dx2-y2"], spin = "up" }
+Co_dx2y2_dn = { shells = ["Co1_d", "Co2_d", "Co3_d"], orbitals = ["dx2-y2"], spin = "dn" }
+Sn_sp       = { shells = ["Sn1_s", "Sn1_p", "Sn2_s", "Sn2_p"] }
+S_p         = { shells = ["S1_p", "S2_p"] }
+
+[kpath]
+points = [
+    [0.50000000, 0.24952000, 0.75048000],
+    [0.37476000, 0.37476000, 0.75048000],
+    [0.00000000, 0.00000000, 0.50000000],
+    [0.00000000, 0.00000000, 0.00000000],
+    [0.50000000, 0.50000000, 0.50000000],
+]
+labels = ["W", "U", "L", "G", "T"]
+nk = 200
+
+# tasks run in the order written
+[task.udmft]
+mesh   = [12, 12, 12]
+ntot   = 43.0
+mu     = 0.0
+shells = ["Co1_d", "Co2_d", "Co3_d"]   # consecutive, same l; one von for all
+local_basis = "eigen"                  # eigen: write eon/von/htmat ; none: identity
+save_mz   = true                       # Mz_eimp_blocked.npy
+check_tol = 1e-3                       # eV, max H_loc mismatch between shells
+
+[task.bands]
+output  = "socwan.dat"
+mu      = 0.0
+project = ["Co_dx2y2_up", "Co_dx2y2_dn", "Co_d"]
+
+[task.dos]
+mesh   = [14, 16, 14]
+emin   = -0.12
+emax   = 0.12
+ne     = 241
+sigma  = 0.005
+mu     = 0.0
+output = "socpdos.dat"
+project = ["Co_d", "Sn_sp", "S_p"]

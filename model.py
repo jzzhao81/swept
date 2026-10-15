@@ -124,22 +124,62 @@ class Model():
             self.ham[Rvec]  = hmat
         self._hstack = None
 
-    def rotate_spin(self, lnum, zxmat):
+    def rotate_spin(self, lnum, zxmat, index=None):
+        # lnum : 每个块的角动量, 整数(所有块相同)或列表
+        # index: 每个块的起始轨道序号; None 时从 0 开始连续排列(旧接口)
+        # 块内轨道按 (m, spin) 自旋交错排列, 大小 2*(2l+1)
         from spinor import rotate_spinor
 
-        # np.set_printoptions(linewidth=180, precision=3)
+        ns = 2
         natm = len(zxmat)
-        ns = 2; nbnd = 2*lnum+1; norb = ns*nbnd
+        lnum = np.broadcast_to(np.asarray(lnum, dtype=int), (natm,)) if np.ndim(lnum) == 0 \
+            else np.asarray(lnum, dtype=int)
+        if len(lnum) != natm:
+            raise ValueError("lnum and zxmat must have the same length")
+        sizes = ns*(2*lnum+1)
+        if index is None:
+            index = np.concatenate(([0], np.cumsum(sizes)[:-1]))
+        index = np.asarray(index, dtype=int)
+        if len(index) != natm:
+            raise ValueError("index and zxmat must have the same length")
 
+        used = np.zeros(self.nwan, dtype=bool)
         smat = np.eye(self.nwan, dtype=complex)
         for iatm in range(natm):
-            dmat = np.kron(np.eye(nbnd), rotate_spinor(*zxmat[iatm]))
-            smat[iatm*norb:(iatm+1)*norb,iatm*norb:(iatm+1)*norb] = dmat
+            ist, ied = index[iatm], index[iatm] + sizes[iatm]
+            if ist < 0 or ied > self.nwan:
+                raise ValueError(f"spin block {iatm} [{ist}:{ied}] out of range (nwan={self.nwan})")
+            if used[ist:ied].any():
+                raise ValueError(f"spin block {iatm} [{ist}:{ied}] overlaps another block")
+            used[ist:ied] = True
+            dmat = np.kron(np.eye(2*lnum[iatm]+1), rotate_spinor(*zxmat[iatm]))
+            smat[ist:ied, ist:ied] = dmat
 
         for Rvec,Hvec in self.ham.items():
             self.ham[Rvec] = np.dot(smat.conj().T, np.dot(Hvec,smat))
         self._hstack = None
 
+        return
+
+    def set_spin_axis(self, axis):
+        # 当前基(自旋交错)的 ↑/↓ 沿全局笛卡尔方向 axis 量子化(如共线磁计算的磁矩方向),
+        # 变换到沿全局 z 量子化的基, 之后 soc / rotate_spin 均以全局 z 为参考。
+        # rotate_spinor(m, x) 的列是 m 方向的 |↑>,|↓> 在 z 基中的表示 D,
+        # H_z = D H_m D^†, 即 S^† H S, S = 1 ⊗ D^†。x 只影响自旋的规范相位。
+        from spinor import rotate_spinor
+
+        if self.nwan % 2 != 0:
+            raise ValueError("set_spin_axis needs a spinful (interleaved) model")
+        m = np.asarray(axis, dtype=float)
+        m = m / np.linalg.norm(m)
+        ref = np.array([0.0, 0.0, 1.0]) if abs(m[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        x = ref - np.dot(ref, m) * m
+        x = x / np.linalg.norm(x)
+
+        smat = np.kron(np.eye(self.nwan//2), rotate_spinor(m, x).conj().T)
+        for Rvec, Hvec in self.ham.items():
+            self.ham[Rvec] = np.dot(smat.conj().T, np.dot(Hvec, smat))
+        self._hstack = None
         return
 
     def soc(self, asoc, lnum, sidx, rot_soc=None):
@@ -350,6 +390,30 @@ class Model():
         mpi.Allgatherv(empi,eigs,ecount,edisp)
         mpi.Allgatherv(pmpi,projs,ecount,edisp)
         return eigs.T, projs.T
+
+    def get_bulk_eprojs_multi(self, klist, plists):
+        # 一次对角化同时计算多组投影权重 sum_{i in plist} |<i|nk>|^2
+        # 返回 eigs (nwan, nk), projs (nproj, nwan, nk)
+        kmpi,kcount,_ = mpi.devide_array(klist, root=0)
+        nproj = len(plists)
+        empi = np.zeros((len(kmpi), self.nwan), dtype=float)
+        pmpi = np.zeros((len(kmpi), nproj, self.nwan), dtype=float)
+        for ikp, kvec in enumerate(kmpi):
+            eig, vec = self.get_bulk_evec(kvec)
+            empi[ikp] = eig
+            weight = np.abs(vec)**2
+            for ipr, plist in enumerate(plists):
+                pmpi[ikp, ipr] = np.sum(weight[plist, :], axis=0)
+
+        eigs  = np.zeros((len(klist), self.nwan), dtype=float)
+        projs = np.zeros((len(klist), nproj, self.nwan), dtype=float)
+        ecount = np.array(kcount)*self.nwan
+        edisp  = np.insert(np.cumsum(ecount),0,0)[0:-1]
+        pcount = ecount*nproj
+        pdisp  = np.insert(np.cumsum(pcount),0,0)[0:-1]
+        mpi.Allgatherv(empi,eigs,ecount,edisp)
+        mpi.Allgatherv(pmpi,projs,pcount,pdisp)
+        return eigs.T, projs.transpose(1, 2, 0)
 
     def get_slab_eigvals(self, klist, nlay, surf_pot=0.0, direction=2):
         kmpi,kcount,_ = mpi.devide_array(klist, root=0)

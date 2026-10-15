@@ -47,6 +47,23 @@ def dump_projs(kpth, eigs, projs, fname='bands.dat', mu=0):
             fdos.write("\n")
             fdos.write("\n")
 
+def dump_projs_multi(kpth, eigs, projs, names, fname='bands.dat', mu=0):
+    # eigs (nbnd, nk), projs (nproj, nbnd, nk); 列: k, E-mu, w_1 ... w_nproj
+    # 只有一组投影时数据格式与 dump_projs 相同
+    output_format = "{:15.9f}{:15.9f}" + "{:15.9f}"*len(names) + "\n"
+    with open(fname,"w") as fdos:
+        fdos.write("# k  E-mu  " + "  ".join(names) + "\n")
+        for ibnd, band in enumerate(eigs):
+            for ikpt, kpt in enumerate(kpth):
+                fdos.write(output_format.format(kpt, band[ikpt]-mu, *projs[:, ibnd, ikpt]))
+            fdos.write("\n")
+            fdos.write("\n")
+
+def dump_ticks(ticks, labels, fname='ticks.dat'):
+    with open(fname,"w") as f:
+        for label, tick in zip(labels, ticks):
+            f.write("{:>10s}{:15.9f}\n".format(label, tick))
+
 def dump_surfbands(kpth, eigs, ptop, pbot, fname='bands.dat', mu=0):
     with open(fname,"w") as fdos:
         for ibnd, band in enumerate(eigs):

@@ -21,9 +21,11 @@ def plot_total_dos(omega, tdos, file='dos.pdf', dpi=100, xlim=None, ylim=None, l
     ax.axvline( 0, linestyle='--', color='grey')
     plt.savefig(file, dpi=dpi)
 
-def dump_total_dos(omega, tdos, pdos, fname):
+def dump_total_dos(omega, tdos, pdos, fname, names=None):
     output_format = "{:15.9f}{:15.9f}"+"{:15.9f}"*len(pdos[0])+"\n"
     with open(fname,"w") as fdos:
+        if names is not None:
+            fdos.write("# E-mu  total  " + "  ".join(names) + "\n")
         for img, ene in enumerate(omega):
             fdos.write(output_format.format(ene, tdos[img], *pdos[img]))
 
