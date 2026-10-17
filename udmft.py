@@ -101,9 +101,23 @@ def local_eigenbasis(h0, ll=2, kramers=False, tr_tol=1e-3):
               * flavour axis          : ksum stores Eimp interleaved and writes
                 Ed as emat(k)=eimp(2k-1), emat(k+nbnd)=eimp(2k), so solver
                 flavour j corresponds to von column perm[j].
-    mz    : Mz = Lz + 2 Sz in the Eimp basis, solver (spin-blocked) order.
-            Under Q3d=False ctqmc's chiS0 / <Sz> are meaningless; the moment
-            must be evaluated as m = sum_f Mz_f <n_f>.
+    mz    : the matrix of Lz + 2 Sz (hbar = 1) in the Eimp basis, solver
+            (spin-blocked) order; z is the shell's local z axis when the shell
+            has z/x.  Under Q3d=False ctqmc's chiS0 / <Sz> are meaningless.
+            In general m_z = Tr(Mz rho) = sum_ab Mz_ab rho_ba, with
+            rho_ab = <c_b^+ c_a> in the same basis; the physical moment is
+            <mu_z> = -mu_B Tr(Mz rho) (operator form mu = -(mu_B/hbar)(L + 2S)
+            for L, S in units of hbar).  Only when the off-diagonal
+            contraction vanishes -- Mz or rho diagonal in this basis is
+            sufficient -- does it reduce to sum_f Mz_ff <n_f>.  Using flavour
+            occupations alone is an approximation (diagonal density matrix)
+            that does not follow from Q3d or from a diagonal hybridization:
+            interactions can make rho off-diagonal; which components are
+            available is set by Sigind, cix and the solver's measurements.
+            kramers=True makes Mz diagonal inside each Kramers pair (solver
+            flavours i and i + 2l+1), not between pairs.  A global direction
+            needs the full moment vector rotated from the local frame; only
+            Mz is provided here.
     """
     nbnd = 2*ll + 1
     h0 = np.asarray(h0)

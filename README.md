@@ -18,7 +18,9 @@ timeout -k 10 900 mpiexec -n 2 python -m unittest discover -s tests -v
 
 The multi-rank error paths (`tests/test_mpi_faults.py`) run only from the
 serial suite: each case is its own `mpiexec -n 2/3` job of
-`tests/mpi_fault_worker.py`, killed as a process group after 60 s.  They are
+`tests/mpi_fault_worker.py` in its own process group; after 60 s the group
+gets SIGTERM and, 5 s later, SIGKILL in any case (workers may outlive the
+launcher), and every read of the job's output is bounded.  They are
 skipped when there is no mpiexec or mpi4py, or the launcher cannot start a
 job (e.g. sockets refused in a sandbox); a control job that starts but fails
 is a test failure.
@@ -74,9 +76,12 @@ MPI: the distributed methods (bands, projections, DOS, Fermi-surface planes,
 chi0 mesh) run the local work between two collective calls inside
 `mpiutils.collective(...)`: a failure on one rank is raised on every rank as
 `mpiutils.CollectiveError` (with a single rank the original exception
-propagates unchanged), and `run.main` reports it and returns 1.  When run as
-a script with several ranks, an exception that escapes `main` is printed and
-the job is ended with `MPI_Abort`.  Not covered: a rank killed by a signal
+propagates unchanged).  Non-finite results found by a check on data that a
+collective made identical everywhere raise `mpiutils.NonFiniteResult`, also
+on every rank.  `run.main` reports these two and returns 1; any other
+exception (a plain `FloatingPointError` included) may be on one rank only:
+when run as a script with several ranks it is printed and the job is ended
+with `MPI_Abort`.  Not covered: a rank killed by a signal
 (e.g. the OOM killer), a native crash, a failure inside an MPI call.
 
 The pipeline is fixed: read hr -> add spin -> eshift -> magmom axis ->
@@ -84,6 +89,11 @@ rotate_spin -> SOC -> tasks (`udmft`, `bands`, `dos`, `symmetry`,
 `fermi_surface`, `chi0`, run in the order written). `[shell] start` is the 0-based orbital index in the hr file.
 Every run writes `swept_run.log` with the swept version, the resolved
 orbital indices and a copy of the input. See `examples/co3sn2s2.toml`.
+
+`spin = "collinear"` merges two hr files (`hr_file` up, `hr_dn` down).  Their
+Wannier orbitals must share order, phase convention and local frames; swept
+only checks nwan and the R sets and cannot verify this.  Atomic SOC added to
+the merged model rests on the same premise.
 
 ## DMFT local basis
 
@@ -95,6 +105,17 @@ time-reversal invariant within `kramers_tol` (eV), symmetrised, and every
 Kramers pair is put in the gauge that diagonalises Mz = Lz + 2Sz (first
 state +Mz, second its exact T partner), so solver flavours are reproducible.
 Leave it off for a magnetic H_loc.
+
+The moment is in general m_z = Tr(Mz rho) with the full local density matrix
+rho in the solver basis (`save_mz = true` writes the full Mz matrix).  It
+reduces to sum_f Mz_ff n_f only when the off-diagonal contraction vanishes
+(Mz or rho diagonal in this basis is sufficient); using flavour occupations
+alone is a diagonal-density-matrix approximation, which does not follow from
+Q3d or from a diagonal hybridization.  `kramers = true` makes Mz diagonal
+inside each pair, not between pairs; the log reports the off-diagonal size.
+Mz is the matrix of Lz + 2Sz (hbar = 1) along the shell's local z; the
+physical moment is <mu_z> = -mu_B Tr(Mz rho).  A global direction needs the
+full moment vector.
 
 ## Symmetry check
 
@@ -174,6 +195,7 @@ vertex = "point_site"      # or "cell"
 total = true               # channel of all orbitals
 project = ["U_5f"]         # further channels
 window_check = 2.0         # optional: redo Gamma and the peak with window*2.0, log the change
+degeneracy_tol = 1e-4      # eV (default): keep-range closure, see below
 kblock = 4096              # k points per block (memory)
 output = "chi0.npz"
 ```
@@ -203,6 +225,17 @@ space-group operations of the crystal.
   <w_a|e^{-iQ.r}|w_b>); bands outside mu +- window dropped (check with
   `window_check`, a diagnostic at Gamma and the peak only).  This is a static
   density response, not an SOC magnetic-moment tensor.
+- Band window: the bands inside mu +- window somewhere on the mesh form a
+  contiguous range, which is then extended until, at every k, no kept band
+  lies within `degeneracy_tol` of a dropped one (steps chain across k).
+  Exactly degenerate subspaces are thus never cut and chi0 does not depend on
+  the eigenvector basis inside them; for split or nearly degenerate levels
+  the tolerance only keeps the cut away from them (energies are unchanged).
+  1e-4 eV is a practical, conservative default, not a bound on the model's
+  level errors.  The log gives the added bands and the smallest gap between
+  the kept range and the next band below/above; dropping the bands outside
+  remains an approximation (truncation error), to be checked by widening the
+  window.
 - Units 1/eV per model unit cell.  spin = "none": B of one spin copy;
   spin-degenerate non-interacting chi_nn = 2B, chi_SzSz = B/2 (hbar = 1).
   Spinful bases: response of the chosen spin-orbital set, no factor applied.
@@ -210,5 +243,7 @@ space-group operations of the crystal.
 `chi0.npz` (format "swept-chi0", version 2) holds the metadata above and,
 per channel c, `chi_<c>` [iq, s, t] (complex), `tau0_<c>`, `sites_<c>`,
 `orbitals_<c>`, `siteidx_<c>`, `offsets_<c>`; `qfrac[iq]` are the
-representatives.  `lindhard.chi_physical_npz(np.load("chi0.npz"), "total", Q)`
+representatives; `bands` and `bands_before_closure` (1-based), `degeneracy_tol`
+and `boundary_gap` = [lower, upper] (eV, inf without an outer band) record the
+band selection.  `lindhard.chi_physical_npz(np.load("chi0.npz"), "total", Q)`
 returns chi(Q) for fractional Q on the mesh plus any integer G.

@@ -129,5 +129,5 @@ def plane_eigens(model, kfrac, plists, chunk=1000):
     with mpi.collective("plane_eigens (output check)"):
         finite = bool(np.isfinite(eigs).all() and np.isfinite(projs).all())
     if not finite:
-        raise FloatingPointError("plane_eigens: non-finite energies or projection weights")
+        raise mpi.NonFiniteResult("plane_eigens: non-finite energies or projection weights")
     return eigs, projs

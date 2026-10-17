@@ -6,6 +6,7 @@ TIMEOUT s, so a regression shows up as a failure rather than a hung suite.  Skip
 inside an MPI job, and skipped (with the reason) only when MPI is clearly unavailable
 here: no launcher, no mpi4py, or a launcher that cannot start (e.g. sockets refused).
 A healthy control that starts but misbehaves is a failure."""
+import itertools
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,28 +33,49 @@ def mpiexec():
     return str(exe) if exe.exists() else shutil.which("mpiexec")
 
 
-def run_job(n, case, tmp):
-    """(returncode or None on timeout, stdout, stderr, markers by rank)."""
-    env = dict(os.environ, TMPDIR=tmp)
-    proc = subprocess.Popen([mpiexec(), "-n", str(n), sys.executable, "-B", "-u", str(WORKER), case],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:                    # no process left in the group
+        pass
+
+
+def supervise(cmd, env=None, timeout=TIMEOUT, grace=5):
+    """Run cmd in its own process group; returns (returncode or None on timeout, stdout, stderr).
+
+    On timeout the whole group gets SIGTERM and, after at most `grace` s, SIGKILL in any
+    case: workers can outlive the launcher (e.g. ignoring SIGTERM) and keep the output
+    pipes open, so the launcher having exited proves nothing.  Every read is bounded;
+    pipes still held by a process outside the group are abandoned."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
                             start_new_session=True)
     try:
-        out, err = proc.communicate(timeout=TIMEOUT)
-        code = proc.returncode
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err
     except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):          # the launcher and all its workers
-            try:
-                os.killpg(proc.pid, sig)
-            except ProcessLookupError:
-                break
-            try:
-                proc.wait(timeout=5)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-        out, err = proc.communicate()
-        code = None
+        pass
+    _signal_group(proc.pid, signal.SIGTERM)
+    try:
+        out, err = proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        out = err = None
+    _signal_group(proc.pid, signal.SIGKILL)       # always, also when the launcher is gone
+    if out is None:
+        try:
+            out, err = proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
+            proc.kill()
+            proc.wait(timeout=grace)
+            out, err = "", "(output abandoned: pipes held open by a process outside the job's group)"
+    return None, out, err
+
+
+def run_job(n, case, tmp):
+    """(returncode or None on timeout, stdout, stderr, markers by rank)."""
+    code, out, err = supervise([mpiexec(), "-n", str(n), sys.executable, "-B", "-u", str(WORKER), case],
+                               env=dict(os.environ, TMPDIR=tmp))
     marks, decoder, pos = {}, json.JSONDecoder(), out.find("MARK {")
     while pos >= 0:                       # robust to markers that share a line
         m, end = decoder.raw_decode(out, pos + 5)
@@ -139,17 +162,61 @@ class MpiFaultTests(unittest.TestCase):
                 for m in self.final(marks, n, info):
                     self.assertEqual((m["outcome"], m["load_input_calls"]), ("status 1", 0), info)
 
-    def test_cli_uncaught_error_aborts_the_job(self):
+    def test_nonfinite_reduced_data_returns_1_everywhere(self):
         for n in SIZES:
             with self.subTest(n=n):
-                code, out, err, marks = run_job(n, "cli_abort", self.tmp)
+                code, marks, info = self.job(n, "nonfinite_main")
+                self.assertEqual(code, 0, info)
+                for m in self.final(marks, n, info):
+                    self.assertEqual(m["outcome"], "status 1", info)
+                self.assertIn("error: NonFiniteResult: mesh_eigens: non-finite band energies", info)
+
+    def test_cli_uncaught_error_aborts_the_job(self):
+        for n, (case, error) in itertools.product(SIZES, [("cli_abort", "RuntimeError"),
+                                                          ("cli_abort_fpe", "FloatingPointError")]):
+            with self.subTest(n=n, case=case):
+                code, out, err, marks = run_job(n, case, self.tmp)
                 info = f"exit {code}\n--- stdout\n{out[-3000:]}\n--- stderr\n{err[-3000:]}"
                 self.assertIsNotNone(code, "timed out: the Abort fallback did not end the job\n" + info)
                 self.assertNotEqual(code, 0, info)
                 self.assertEqual(sorted(marks), list(range(n)), info)      # all ranks had started
                 self.assertTrue(all(m[-1]["outcome"] == "started" for m in marks.values()), info)
-                self.assertIn("RuntimeError: injected uncaught error on rank 0", err + out, info)
+                self.assertIn(f"{error}: injected uncaught error on rank 0", err + out, info)
                 self.assertIn("mpi_abort", (err + out).lower(), info)
+
+
+LAUNCHER = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import os, signal, time; "
+                          "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                          "print('child', os.getpid(), flush=True); time.sleep(300)"])
+print("launcher up", flush=True)
+time.sleep(300)
+"""
+
+
+@unittest.skipIf(mpi.size > 1, "process-group test; run it from the serial suite")
+class SupervisorTests(unittest.TestCase):
+    def test_worker_ignoring_sigterm_after_launcher_exit(self):
+        # the launcher dies on SIGTERM, its child ignores it and keeps the pipes open
+        start = time.monotonic()
+        code, out, err = supervise([sys.executable, "-c", LAUNCHER], timeout=2, grace=2)
+        elapsed = time.monotonic() - start
+        self.assertIsNone(code)
+        self.assertLess(elapsed, 2 + 2*2 + 3, f"supervisor took {elapsed:.1f} s")
+        self.assertIn("launcher up", out)
+        child = int(out.split("child ")[1].split()[0])
+        for _ in range(40):                          # reparented, reaped by init
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f"child {child} survived the supervisor")
+
+    def test_normal_exit(self):
+        self.assertEqual(supervise([sys.executable, "-c", "print('hi')"], timeout=20)[:2], (0, "hi\n"))
 
 
 if __name__ == "__main__":

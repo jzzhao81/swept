@@ -123,15 +123,28 @@ def zx_to_rmat(z,x):
 
     Parameters
     ----------
-    z:    np.ndarray((3,1), dtype=np.float64)
-    x:    np.ndarray((3,1), dtype=np.float64)
+    z:    array-like, shape (3,)
+    x:    array-like, shape (3,), orthogonal to z
     
     Returns
     ---------
-    rmat:   [x,y,z] np.ndarray((3,3), dtype=np.float64)
+    rmat:   [x,y,z] np.ndarray((3,3), dtype=np.float64); a rotation up to the
+            1e-6 orthogonality tolerance (not exactly SO(3) for slightly
+            non-orthogonal input).  Raises ValueError for zero, non-finite or
+            non-orthogonal axes.
     """
     z = np.array(z, dtype=float) 
     x = np.array(x, dtype=float) 
+    # the result is used as a rotation (Euler angles, D matrices): reject axes
+    # that are zero, non-finite or not orthogonal within 1e-6 (as run.py does)
+    if z.shape != (3,) or x.shape != (3,) or not (np.isfinite(z).all() and np.isfinite(x).all()):
+        raise ValueError(f"zx_to_rmat: z and x must be finite 3-vectors, got {z!r}, {x!r}")
+    nz, nx = np.sqrt(np.dot(z,z)), np.sqrt(np.dot(x,x))
+    if not (np.isfinite(nz) and np.isfinite(nx)) or nz < 1e-12 or nx < 1e-12:
+        raise ValueError(f"zx_to_rmat: z and x must be non-zero with finite length, got {z!r}, {x!r}")
+    cos = np.dot(z,x) / (nz*nx)
+    if abs(cos) > 1e-6:
+        raise ValueError(f"zx_to_rmat: z and x must be orthogonal within 1e-6 (cos angle = {cos:.2e})")
     xx = x / np.sqrt(np.dot(x,x))
     zz = z / np.sqrt(np.dot(z,z))
     yy = np.cross(zz,xx)

@@ -160,6 +160,21 @@ class SerialCollectiveTests(unittest.TestCase):       # item 2, single rank
             with self.assertRaises(np.linalg.LinAlgError):
                 model.get_bulk_eigvals(np.zeros((2, 3)))
 
+    def test_main_returns_1_only_for_synchronised_errors(self):
+        # NonFiniteResult (check on reduced data) is reported; a plain FloatingPointError
+        # may come from one rank only, so main must not swallow it
+        for exc, returns in [(mpi.NonFiniteResult("reduced"), True), (FloatingPointError("local"), False)]:
+            with self.subTest(exc=type(exc).__name__), temp_dir():
+                chain().to_hr("x_hr.dat")
+                Path("in.toml").write_text(BASE.format(extra=""))
+                with mock.patch("swept.lindhard.mesh_eigens", side_effect=exc), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    if returns:
+                        self.assertEqual(run.main(["in.toml"]), 1)
+                    else:
+                        with self.assertRaises(FloatingPointError):
+                            run.main(["in.toml"])
+
     def test_empty_k_list(self):
         self.assertEqual(chain().get_bulk_eigvals(np.zeros((0, 3))).shape, (2, 0))
 

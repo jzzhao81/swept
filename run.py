@@ -308,7 +308,7 @@ def validate(cfg):
                                  "(REVIEW_2026-10-16 #2/#3); only the exact q/-q pairing is used")
             _check_keys(task, where, required=("mesh", "kT"),
                         optional=("mu", "window", "vertex", "total", "project", "symprec",
-                                  "window_check", "kblock", "output"))
+                                  "window_check", "kblock", "output", "degeneracy_tol"))
             if task.get("vertex", "point_site") not in ("point_site", "cell"):
                 raise InputError(f"{where} vertex must be 'point_site' or 'cell'")
             if not isinstance(task.get("total", True), bool):
@@ -326,7 +326,7 @@ def validate(cfg):
             if dup:
                 raise InputError(f"{where} duplicate channel name(s) {dup}: 'total' is the all-orbital "
                                  "channel while total = true, and project entries must be distinct")
-        for pname in ("tol", "symprec", "check_tol", "kramers_tol", "kT", "window", "sigma"):
+        for pname in ("tol", "symprec", "check_tol", "kramers_tol", "kT", "window", "sigma", "degeneracy_tol"):
             if pname in task and (not _is_number(task[pname]) or task[pname] <= 0):
                 raise InputError(f"{where} {pname} must be a positive finite number")
         if "mu" in task and not _is_number(task["mu"]):
@@ -538,6 +538,21 @@ def reciprocal(cfg):
 # tasks
 # ----------------------------------------------------------------------------
 
+def mz_offdiagonal_summary(mz, kramers):
+    """Size of the off-diagonal Mz elements (solver order), for the log."""
+    off = np.abs(mz - np.diag(np.diag(mz)))
+    text = f"max |off-diagonal Mz| = {off.max():.3e}"
+    if kramers:                                    # pair i = solver flavours (i, i + nbnd)
+        nbnd = len(mz)//2
+        pair = np.zeros_like(off, dtype=bool)
+        pair[np.arange(nbnd), np.arange(nbnd) + nbnd] = pair[np.arange(nbnd) + nbnd, np.arange(nbnd)] = True
+        text += (f" (inside Kramers pairs {off[pair].max():.3e}, between pairs "
+                 f"{off[~pair].max() if (~pair).any() else 0.0:.3e})")
+    return text + ("; m = sum_f Mz_ff n_f holds only when the off-diagonal contraction "
+                   "Tr(Mz rho) - sum_f Mz_ff rho_ff vanishes (Mz or rho diagonal suffices); "
+                   "in general m = Tr(Mz rho)")
+
+
 def task_udmft(cfg, task, tbmodel, shells, log):
     from .udmft import (local_eigenbasis, onsite_block_mismatch, dump_local_basis, dump_dmft,
                        time_reversal_error)
@@ -574,6 +589,7 @@ def task_udmft(cfg, task, tbmodel, shells, log):
             log("udmft: Kramers gauge fixed by Mz; H_loc symmetrised under T")
         log("udmft: Eimp = " + np.array2string(eon, precision=5, max_line_width=200))
         log("udmft: Mz per solver flavour = " + np.array2string(np.diag(mz).real, precision=4, max_line_width=200))
+        log("udmft: " + mz_offdiagonal_summary(mz, task.get("kramers", False)))
 
     kpts = Kpoint.gen_uniform_kpoints(task["mesh"])
     log(f"udmft: diagonalising {kpts.nktot} k-points")
@@ -804,11 +820,13 @@ def task_chi0(cfg, task, tbmodel, shells, log):
     vertex = task.get("vertex", "point_site")
     kblock = task.get("kblock", 4096)
     output = task.get("output", "chi0.npz")
+    dtol = task.get("degeneracy_tol", lh.DEGENERACY_TOL)
     chans = chi0_channels(cfg, task, tbmodel, shells, log)
     for name, c, snames in chans:
         log(f"chi0 channel {name}: {len(c['orbitals'])} orbitals on sites {snames}, vertex {vertex}")
     try:
-        res = lh.lindhard(tbmodel, mesh, mu, kT, window, [c for _, c, _ in chans], kblock=kblock, log=log)
+        res = lh.lindhard(tbmodel, mesh, mu, kT, window, [c for _, c, _ in chans], kblock=kblock, log=log,
+                          degeneracy_tol=dtol)
     except ValueError as exc:
         raise InputError(f"[task.chi0] {exc}")
 
@@ -828,8 +846,10 @@ def task_chi0(cfg, task, tbmodel, shells, log):
     check = []
     if "window_check" in task:
         wide = window*task["window_check"]
-        eig2, vec2, bands2 = lh.mesh_eigens(tbmodel, mesh, mu, wide)
+        sel2 = {}
+        eig2, vec2, bands2 = lh.mesh_eigens(tbmodel, mesh, mu, wide, dtol, info=sel2)
         log(f"chi0 window_check: window {window} -> {wide} eV ({len(res['bands'])} -> {len(bands2)} bands)")
+        lh.log_band_selection(sel2, dtol, log)
         for ic, (name, c, _) in enumerate(chans):
             for Q in (np.zeros(3), peaks[name]):
                 iq = lh.mesh_index(np.rint(Q*np.asarray(mesh)).astype(int), mesh)
@@ -859,10 +879,16 @@ def task_chi0(cfg, task, tbmodel, shells, log):
                           "chi(Q) = sum_st e^{-2 pi i Q.tau0_s} chi_st e^{+2 pi i Q.tau0_t}"),
         approximation=("point-site density vertex (no Wannier form factors)" if vertex == "point_site"
                        else "cell density vertex (no position phases, no form factors)")
-        + "; bands outside mu +- window dropped")
+        + "; bands outside mu +- window dropped (range closed under degeneracy_tol, see lindhard.select_bands)",
+        band_selection_note=("bands, bands_before_closure: 1-based, inclusive; boundary_gap = [lower, upper]: "
+                             "smallest gap on the mesh between the kept range and the next band below / above "
+                             "(eV, inf if none)"))
     data = dict(meta, mesh=np.asarray(mesh), kT=kT, mu=mu, window=window, bands=res["bands"]+1,
                 channels=np.array([n for n, _, _ in chans], dtype=str), qfrac=qfrac, bvec=bvec,
-                window_occupation=res["window_occupation"])
+                window_occupation=res["window_occupation"], degeneracy_tol=dtol,
+                bands_before_closure=np.arange(res["band_selection"]["initial"][0],
+                                               res["band_selection"]["initial"][1] + 1) + 1,
+                boundary_gap=np.array(res["band_selection"]["boundary_gap"]))
     for ic, (name, c, snames) in enumerate(chans):
         data.update({f"chi_{name}": res["chi"][ic], f"tau0_{name}": c["tau0"],
                      f"sites_{name}": np.array(snames, dtype=str), f"orbitals_{name}": c["orbitals"],
@@ -985,8 +1011,9 @@ def main(argv=None):
     except OutputError as exc:
         log(f"output error: {exc}")
         return 1
-    except (mpi.CollectiveError, FloatingPointError) as exc:
-        # raised on every rank alike (collective failure, or a check on reduced data)
+    except (mpi.CollectiveError, mpi.NonFiniteResult) as exc:
+        # raised on every rank alike (collective failure, or a check on reduced data);
+        # anything else may be on one rank only and goes to the Abort below
         log(f"error: {type(exc).__name__}: {exc}")
         return 1
     finally:

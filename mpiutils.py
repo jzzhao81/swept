@@ -43,6 +43,12 @@ class CollectiveError(RuntimeError):
     """Raised on every rank when local work failed on at least one rank (several ranks only)."""
 
 
+class NonFiniteResult(FloatingPointError):
+    """Non-finite values found by a check on data a collective call made identical on
+    every rank, so every rank raises it alike.  Only for such checks: a plain
+    FloatingPointError says nothing about the other ranks."""
+
+
 @contextlib.contextmanager
 def _collective(what, comm):
     """Implementation of collective() for a given communicator (the mpiutils wrappers

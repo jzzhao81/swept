@@ -3,8 +3,9 @@ mpi_fault_worker.py CASE` (not a test module itself).
 
 Every rank prints one line `MARK {json}` with its rank and outcome ("returned", the name of
 the exception it caught, or "status S" for run.main) and exits 0, so the parent can check
-each rank.  Case "cli_abort" instead runs the production `python -m swept.run` entry with
-an uncaught error on rank 0 and is expected to end through MPI Abort."""
+each rank.  Cases "cli_abort" (RuntimeError) and "cli_abort_fpe" (a plain FloatingPointError)
+instead run the production `python -m swept.run` entry with an uncaught error on rank 0 and
+are expected to end through MPI Abort."""
 import json
 import os
 import runpy
@@ -142,13 +143,29 @@ def main(case, extra):
         run.load_input = counting
         status = run.main(["in.toml"])
         return dict(outcome=f"status {status}", load_input_calls=calls[0])
-    elif case == "cli_abort":
+    elif case == "nonfinite_main":              # identical non-finite reduced data on all ranks
+        input_dir()
+        real = mpi.Allreduce
+
+        def nan_first(sendobj, *args, **kwargs):
+            out = real(sendobj, *args, **kwargs)
+            if not nan_first.done:
+                out = np.full_like(out, np.nan)
+                nan_first.done = True
+            return out
+        nan_first.done = False
+        mpi.Allreduce = nan_first
+        status = run.main(["in.toml"])
+        mpi.Allreduce = real
+        return dict(outcome=f"status {status}")
+    elif case in ("cli_abort", "cli_abort_fpe"):
         input_dir(spin="doubled")
         real = Model.addspinbasis
+        error = RuntimeError if case == "cli_abort" else FloatingPointError
 
         def failing(self, *args, **kwargs):          # outside any collective guard
             if mpi.rank == 0:
-                raise RuntimeError("injected uncaught error on rank 0")
+                raise error("injected uncaught error on rank 0")
             return real(self, *args, **kwargs)
         Model.addspinbasis = failing
         mark(outcome="started")

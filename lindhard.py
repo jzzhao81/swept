@@ -21,6 +21,13 @@ Units: 1/eV per model unit cell.  U are eigenvectors of Model.get_bulk_Hk
 (H(k) = sum_R e^{2 pi i k.R} H(R)), so the vertex phases above are what turn
 the lattice-gauge overlaps into point-site densities.
 
+Band window: only the bands with energies within mu +- window somewhere on the
+mesh are kept, extended until no kept band is within degeneracy_tol of a dropped
+one at any k (select_bands).  Exactly degenerate subspaces are therefore never cut
+and chi0 does not depend on the eigenvector basis inside them; dropping the bands
+outside the window remains an approximation (truncation error), to be checked by
+widening the window.
+
 Mesh index convention everywhere: ik = (i0*N1 + i1)*N2 + i2.
 '''
 
@@ -70,10 +77,56 @@ def mesh_points(mesh):
     return np.array(np.meshgrid(*[np.arange(n) for n in mesh], indexing="ij")).reshape(3, -1).T
 
 
-def mesh_eigens(model, mesh, mu, window):
+DEGENERACY_TOL = 1e-4      # eV, default for select_bands / mesh_eigens / lindhard
+
+
+def select_bands(eall, window, degeneracy_tol=DEGENERACY_TOL):
+    """Bands kept for chi0, from the energies E - mu (nk, nb) on the whole mesh (sorted per k).
+
+    First the bands inside +- window somewhere on the mesh; that set is a contiguous range,
+    because the per-band minimum and maximum over the mesh both grow with the band index.
+    Then the range is closed under near degeneracy: while, at any k, the band just outside
+    an end lies within degeneracy_tol (eV) of the end band, it is added.  Steps along
+    different k chain, so no kept band is within the tolerance of a dropped one anywhere.
+    Exactly degenerate subspaces are thus kept or dropped whole, and chi0 does not depend on
+    the eigenvector basis eigh picks inside them; for split levels (numerical noise, near
+    degeneracy) the tolerance only keeps the cut away from them -- energies are not changed.
+    Returns (bands 0-based, info) with info = dict(initial=[lo, hi] 0-based,
+    boundary_gap=[lower, upper] in eV after the closure (inf without an outer band),
+    added=[(side, band, k index), ...])."""
+    for name, value in (("window", window), ("degeneracy_tol", degeneracy_tol)):
+        if isinstance(value, (bool, np.bool_)) or not np.isscalar(value) \
+                or not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be a positive finite number (eV), got {value!r}")
+    nb = eall.shape[1]
+    sel = np.flatnonzero((eall.min(axis=0) < window) & (eall.max(axis=0) > -window))
+    if sel.size == 0:
+        raise ValueError(f"no band within mu +- {window} eV on the mesh")
+    lo, hi = int(sel[0]), int(sel[-1])
+    assert sel.size == hi - lo + 1, "band window is not contiguous"
+    info = dict(initial=[lo, hi], added=[])
+    while lo > 0:
+        near = np.flatnonzero(eall[:, lo] - eall[:, lo-1] <= degeneracy_tol)
+        if near.size == 0:
+            break
+        lo -= 1
+        info["added"].append(("lower", lo, int(near[0])))
+    while hi < nb - 1:
+        near = np.flatnonzero(eall[:, hi+1] - eall[:, hi] <= degeneracy_tol)
+        if near.size == 0:
+            break
+        hi += 1
+        info["added"].append(("upper", hi, int(near[0])))
+    info["boundary_gap"] = [float((eall[:, lo] - eall[:, lo-1]).min()) if lo > 0 else np.inf,
+                            float((eall[:, hi+1] - eall[:, hi]).min()) if hi < nb - 1 else np.inf]
+    return np.arange(lo, hi + 1), info
+
+
+def mesh_eigens(model, mesh, mu, window, degeneracy_tol=DEGENERACY_TOL, info=None):
     """Energies E - mu (nk, nb) and eigenvectors (nk, nwan, nb) of the bands
-    with energies inside mu +- window somewhere on the mesh.  Planes i0 are
-    dealt over MPI ranks.  Returns (eigs, vecs, bands) with 0-based bands."""
+    chosen by select_bands (inside mu +- window somewhere on the mesh, closed under
+    degeneracy).  Planes i0 are dealt over MPI ranks.  Returns (eigs, vecs, bands)
+    with 0-based bands; a dict passed as info receives select_bands' info."""
     # every local stage is guarded (mpi.collective): a failure on one rank is
     # raised on all of them; the checks after each Allreduce see identical data
     with mpi.collective("mesh_eigens (energies)"):
@@ -88,11 +141,17 @@ def mesh_eigens(model, mesh, mu, window):
         finite = bool(np.isfinite(eall).all())
         if finite:
             eall = eall - mu
-            bands = np.flatnonzero((eall.min(axis=0) < window) & (eall.max(axis=0) > -window))
+            try:
+                bands, sel_info = select_bands(eall, window, degeneracy_tol)
+                err = None
+            except ValueError as exc:            # empty window: same data, same verdict everywhere
+                err = exc
     if not finite:
-        raise FloatingPointError("mesh_eigens: non-finite band energies")
-    if bands.size == 0:
-        raise ValueError(f"no band within mu +- {window} eV on the mesh")
+        raise mpi.NonFiniteResult("mesh_eigens: non-finite band energies")
+    if err is not None:
+        raise err
+    if info is not None:
+        info.update(sel_info)
     with mpi.collective("mesh_eigens (eigenvectors)"):
         vecs = np.zeros((n0*npl, model.nwan, len(bands)), dtype=complex)
         for i0 in mine:
@@ -103,7 +162,7 @@ def mesh_eigens(model, mesh, mu, window):
         finite = bool(np.isfinite(vecs).all())
         eigs = eall[:, bands]
     if not finite:
-        raise FloatingPointError("mesh_eigens: non-finite eigenvectors")
+        raise mpi.NonFiniteResult("mesh_eigens: non-finite eigenvectors")
     return eigs, vecs, bands
 
 
@@ -152,16 +211,18 @@ def site_matrices(eigs, vecs, points, mesh, iq, channels, kT, kblock=4096):
 
 
 def lindhard(model, mesh, mu, kT, window, channels, kblock=4096, use_pairs=True,
-             imag_rtol=1e-10, imag_atol=1e-14, log=print):
+             imag_rtol=1e-10, imag_atol=1e-14, log=print, degeneracy_tol=DEGENERACY_TOL):
     """Site-resolved chi for every channel on the whole mesh.
     Returns dict(chi=[(nk, ns, ns) complex per channel], points, bands,
     window_occupation)."""
-    eigs, vecs, bands = mesh_eigens(model, mesh, mu, window)
+    sel = {}
+    eigs, vecs, bands = mesh_eigens(model, mesh, mu, window, degeneracy_tol, info=sel)
     errors = []
     try:                                    # all local work up to the next collective
         points = mesh_points(mesh)
         nk = len(points)
         log(f"chi0: {nk} k-points, {len(bands)} bands within mu +- {window} eV: {(bands+1).tolist()}")
+        log_band_selection(sel, degeneracy_tol, log)
         minus = mesh_index(-points, mesh)
         todo = np.flatnonzero(np.arange(nk) <= minus) if use_pairs else np.arange(nk)
         log(f"chi0: {len(todo)} q computed of {nk}" + (" (q, -q paired)" if use_pairs else ""))
@@ -192,7 +253,17 @@ def lindhard(model, mesh, mu, kT, window, channels, kblock=4096, use_pairs=True,
     chi = [mpi.Allreduce(c) for c in chi]
     with mpi.collective("lindhard (window occupation)"):
         occupation = float(fermi(eigs, kT).sum())/nk
-    return dict(chi=chi, points=points, bands=bands, window_occupation=occupation)
+    return dict(chi=chi, points=points, bands=bands, window_occupation=occupation, band_selection=sel)
+
+
+def log_band_selection(info, degeneracy_tol, log):
+    lo, hi = info["initial"]
+    if info["added"]:
+        log(f"chi0: degeneracy closure (tol {degeneracy_tol:g} eV) extends bands {lo+1}-{hi+1} by "
+            f"{len(info['added'])}: " + ", ".join(f"{b+1} ({side}, first at k index {k})"
+                                                 for side, b, k in info["added"]))
+    gap = ", ".join("none" if np.isinf(g) else f"{g*1e3:.3f} meV" for g in info["boundary_gap"])
+    log(f"chi0: smallest gap on the mesh between kept and dropped bands (below, above): {gap}")
 
 
 def chi_of_matrix(m, tau0, qfrac):
