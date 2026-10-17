@@ -8,6 +8,7 @@ LastEditors: your name
 LastEditTime: 2024-01-19 15:14:00
 '''
 
+import contextlib
 import sys
 import warnings
 
@@ -37,6 +38,53 @@ try:
 except ImportError:
 
     warnings.warn("Warning: mpi4py not installed.")
+
+class CollectiveError(RuntimeError):
+    """Raised on every rank when local work failed on at least one rank (several ranks only)."""
+
+
+@contextlib.contextmanager
+def _collective(what, comm):
+    """Implementation of collective() for a given communicator (the mpiutils wrappers
+    pass their own); rank, size and the message exchange all come from comm."""
+    if comm is None or comm.size == 1:
+        yield
+        return
+    err = None
+    try:
+        yield
+    except Exception as exc:              # KeyboardInterrupt/SystemExit are not intercepted
+        err = exc
+    msgs = [m for m in comm.allgather(None if err is None else
+                                      f"rank {comm.rank}: {type(err).__name__}: {err}") if m]
+    if msgs:
+        raise CollectiveError(f"{what} failed on {len(msgs)} rank(s): " + "; ".join(msgs[:5])) from err
+
+
+def collective(what):
+    """Guard for the local work between two collective calls on COMM_WORLD.
+
+    Every rank must enter, also one with no local work, and the block must not
+    contain a collective call.  Single rank: the block runs unguarded and an
+    exception propagates unchanged.  Several ranks: an exception in the block
+    is held, all ranks exchange one message (allgather), and if any rank failed
+    every rank raises CollectiveError naming the failed ranks and their
+    exception types; the failing rank chains its own exception.  Not covered:
+    a process killed by a signal, a native crash, a failure inside an MPI call."""
+    return _collective(what, comm)
+
+
+def allgather(obj, comm=comm):
+    if comm is not None and comm.size > 1:
+        return comm.allgather(obj)
+    else:
+        return [obj]
+
+def barrier(comm=comm):
+    """Real synchronisation.  bcast is not one: the root returns as soon as
+    the (small) message is sent, before the other ranks have arrived."""
+    if comm is not None and comm.size > 1:
+        comm.Barrier()
 
 def bcast(obj, root=0, comm=comm):
     if comm is not None and comm.size > 1:
@@ -75,7 +123,8 @@ def gather(obj, root, comm=comm):
 def Allreduce(sendobj, op=None, comm=comm):
     from numpy import zeros_like
     if comm is not None and comm.size > 1:
-        recvobj = zeros_like(sendobj)
+        with _collective("Allreduce (receive buffer)", comm):
+            recvobj = zeros_like(sendobj)
         comm.Allreduce(sendobj, recvobj, op=(op or MPI.SUM))
         return recvobj
     else:
@@ -87,9 +136,20 @@ def Allreduce(sendobj, op=None, comm=comm):
 #     else:
 #         recvobj = sendobj
 
+def _as_double(name, arr):
+    """Buffers sent as MPI.DOUBLE must really be contiguous float64."""
+    from numpy import float64
+    if arr.dtype != float64 or not arr.flags.c_contiguous:
+        raise TypeError(f"{name}: MPI.DOUBLE buffer must be C-contiguous float64, got "
+                        f"{arr.dtype}{'' if arr.flags.c_contiguous else ' (non-contiguous)'}")
+    return arr
+
 def Allgatherv(sendobj, recvobj, count, disp, comm=comm):
     if comm is not None:
-        comm.Allgatherv(sendobj, [recvobj,count,disp,MPI.DOUBLE])
+        with _collective("Allgatherv (buffer check)", comm):
+            send = _as_double("Allgatherv send", sendobj)
+            recv = _as_double("Allgatherv recv", recvobj)
+        comm.Allgatherv(send, [recv, count, disp, MPI.DOUBLE])
     else:
         recvobj[...] = sendobj.reshape(recvobj.shape)
 
@@ -101,21 +161,25 @@ def Allgatherv(sendobj, recvobj, count, disp, comm=comm):
 
 def devide_array(sendobj, root):
     """
-    Devide sendobj into size part.
+    Devide sendobj into size part along the first axis.  The data are sent as
+    MPI.DOUBLE, so the input is converted to C-contiguous float64 first (a
+    float32 or integer array would otherwise be read with the wrong layout).
     """
-    from numpy import zeros
-    from functools import reduce
+    from numpy import zeros, ascontiguousarray, float64, prod
 
+    with _collective("devide_array (preparation)", comm):
+        sendobj = ascontiguousarray(sendobj, dtype=float64)
+        if sendobj.ndim < 1:
+            raise ValueError("devide_array: need an array with at least one axis")
+        if comm is not None:
+            total_count = len(sendobj)
+            " For array more than 1 dimension, we only devide the first axis "
+            coeff = int(prod(sendobj.shape[1:], dtype=int))
+            count = [coeff*(total_count//size+1) if irank <= total_count % size-1
+                     else coeff*(total_count//size) for irank in range(size)]
+            disp = [sum(count[:irank]) for irank in range(size)]
+            recvobj = zeros(count[rank])
     if comm is None:
         return sendobj, [len(sendobj)], [0]
-
-    total_count = len(sendobj)
-    " For array more than 1 dimension, we only devide the first axis "
-    coeff = reduce(lambda x, y: x*y, sendobj.shape[1:])
-    count = [coeff*(total_count//size+1) if irank <= total_count % size-1
-             else coeff*(total_count//size) for irank in range(size)]
-    disp = [sum(count[:irank]) for irank in range(size)]
-    recvobj = zeros(count[rank])
     comm.Scatterv([sendobj, count, disp, MPI.DOUBLE], recvobj, root=root)
     return recvobj.reshape(-1, *sendobj.shape[1:]), [ic//coeff for ic in count], [id//coeff for id in disp]
-

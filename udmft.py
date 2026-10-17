@@ -9,8 +9,8 @@ Description: dump Wannier eigenvalues / projectors for the ksum + DMFT interface
 import os
 import numpy as np
 import scipy.linalg as la
-from basis import complex2real
-from kpoint import Kpoint
+from .basis import complex2real
+from .kpoint import Kpoint
 
 
 def spin_block_perm(nbnd):
@@ -19,7 +19,66 @@ def spin_block_perm(nbnd):
     return np.r_[0:2*nbnd:2, 1:2*nbnd:2]
 
 
-def local_eigenbasis(h0, ll=2):
+def time_reversal_matrix(nbnd):
+    """Unitary part of T = i sigma_y K in the spin-interleaved real-harmonic
+    basis (real orbitals are T-even): T|m up> = -|m dn>, T|m dn> = |m up>."""
+    return np.kron(np.eye(nbnd), np.array([[0.0, 1.0], [-1.0, 0.0]]))
+
+
+def time_reversal_error(h0):
+    """max |T h0 T^-1 - h0|; zero for a nonmagnetic on-site block."""
+    h0 = np.asarray(h0)
+    theta = time_reversal_matrix(h0.shape[0]//2)
+    return np.max(np.abs(theta @ h0.conj() @ theta.T - h0))
+
+
+def kramers_eigenbasis(h0, mz_r, tr_tol=1e-3):
+    """Eigenbasis of a T-invariant h0 with every Kramers pair in a fixed gauge.
+
+    eigh returns an arbitrary U(2) mixture inside each degenerate pair.  Here
+    the first state of a pair maximises <Mz> and the second is its exact time
+    reversed partner, so solver flavours (1+, 2+, ..., 1-, 2-, ...) are
+    reproducible and Mz is diagonal in every pair.  h0 is symmetrised,
+    (h0 + T h0 T^-1)/2, after checking that its T-odd part is below tr_tol (eV):
+    a magnetic h0 must not be forced into pairs."""
+    h0 = np.asarray(h0, dtype=complex)
+    n = h0.shape[0]
+    theta = time_reversal_matrix(n//2)
+    h0_tr = theta @ h0.conj() @ theta.T
+    err = np.max(np.abs(h0_tr - h0))
+    if err > tr_tol:
+        raise ValueError(f"on-site block breaks time reversal by {err:.3e} eV > {tr_tol:.1e}; "
+                         "Kramers gauge only applies to a nonmagnetic H_loc")
+    h0 = 0.5*(h0 + h0_tr)
+    h0 = 0.5*(h0 + h0.conj().T)
+
+    eon, raw = la.eigh(h0)
+    von = np.empty_like(raw)
+    for i in range(0, n, 2):
+        if eon[i+1] - eon[i] > 1e-8:
+            raise ValueError(f"states {i}, {i+1} are not a Kramers pair (splitting {eon[i+1] - eon[i]:.3e} eV)")
+        pair = raw[:, i:i+2]
+        mval, mvec = la.eigh(pair.conj().T @ mz_r @ pair)
+        if np.max(np.abs(mval)) < 1e-10:
+            raise ValueError(f"Mz vanishes in Kramers pair {i//2}; cannot fix its gauge")
+        plus = pair @ mvec[:, np.argmax(mval)]
+        # phase reference: first component within 1e-6 of the largest
+        # modulus; a bare argmax flips between symmetry-equal components
+        # under roundoff
+        amp = np.abs(plus)
+        ipiv = np.flatnonzero(amp > amp.max() - 1e-6)[0]
+        plus *= np.exp(-1j*np.angle(plus[ipiv]))
+        minus_exact = theta @ plus.conj()
+        minus = pair @ (pair.conj().T @ minus_exact)
+        if la.norm(minus_exact - minus) > 1e-6:
+            raise ValueError(f"Kramers pair {i//2} is not closed under T "
+                             "(degeneracy beyond Kramers, e.g. a cubic quartet)")
+        minus -= plus * np.vdot(plus, minus)
+        von[:, i], von[:, i+1] = plus, minus / la.norm(minus)
+    return eon, von
+
+
+def local_eigenbasis(h0, ll=2, kramers=False, tr_tol=1e-3):
     """Diagonalise the on-site Hamiltonian of one correlated shell.
 
     h0 is the (2*(2l+1))^2 block in the spin-interleaved real-harmonic basis.
@@ -27,11 +86,16 @@ def local_eigenbasis(h0, ll=2):
     diagonalised; splitting it into up/up and dn/dn blocks leaves sizeable
     off-diagonal terms in Eimp which ksum silently drops.
 
+    kramers=True (nonmagnetic h0 only): fix the gauge of every Kramers pair
+    with kramers_eigenbasis; otherwise a plain eigh.
+
     Returns
     -------
     eon   : eigenvalues of h0 (ascending)
     von   : eigenvectors of h0, columns in interleaved flavour order
-    htmat : T2C[a,i] = <complex_a | Eimp_i> for atom_d (which reads CF = T2C.T).
+    htmat : T2C[a,i] = <complex_a | Eimp_i> for atom_d (which reads CF = T2C.T),
+            i.e. T2C = c2r @ von with c2r[a,b] = <complex_a | real_b> and
+            von[b,i] = <real_b | Eimp_i>; no complex conjugation of von.
             Both axes are permuted to spin-blocked order:
               * complex-harmonic axis : interleaved -> spin blocked (atom_d)
               * flavour axis          : ksum stores Eimp interleaved and writes
@@ -46,14 +110,17 @@ def local_eigenbasis(h0, ll=2):
     if h0.shape != (2*nbnd, 2*nbnd):
         raise ValueError(f"h0 must be {2*nbnd}x{2*nbnd} for l={ll}, got {h0.shape}")
 
-    eon, von = la.eigh(h0)
     perm = spin_block_perm(nbnd)
     c2r = complex2real(ll, 2)
-    htmat = von[:, perm].conj().T @ c2r[perm, :].T
-
     lz = np.kron(np.diag(np.arange(-ll, ll+1, dtype=float)), np.eye(2))
     sz = np.kron(np.eye(nbnd), np.diag([0.5, -0.5]))
     mz_r = c2r.conj().T @ lz @ c2r + 2.0*sz
+
+    if kramers:
+        eon, von = kramers_eigenbasis(h0, mz_r, tr_tol=tr_tol)
+    else:
+        eon, von = la.eigh(h0)
+    htmat = (c2r[perm, :] @ von[:, perm]).T
     mz = von[:, perm].conj().T @ mz_r @ von[:, perm]
 
     return eon, von, htmat, mz

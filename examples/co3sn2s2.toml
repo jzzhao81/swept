@@ -6,7 +6,9 @@
 hr_file = "co3sn2s2_hr.dat"
 spin    = "spinor"          # none | doubled | collinear | spinor
 eshift  = -12.5776          # eV, puts E_F at 0
+# wsvec       = "co3sn2s2_wsvec.dat"  # wannier90 use_ws_distance images
 # hr_dn       = "xxx_dn_hr.dat"   # spin = "collinear" only
+# wsvec_dn    = "xxx_dn_wsvec.dat"    # spin = "collinear", with wsvec
 # magmom_axis = [0, 0, 1]         # spin = "collinear" only
 # allow_extra_soc = false         # spin = "spinor" only
 
@@ -19,18 +21,23 @@ rvec = [
     [ 0.0,     -3.0997358602521814, 4.392],
 ]
 
-# name = { start, l [, z, x] }; z/x = local spin quantisation frame,
-# rotate_spin is applied to the shells that give them
+# name = { start, l [, z, x, pos] }
+#   z/x = local axes of the wannier90 projection (z=..., x=...); a spinful
+#         model also gets its spin rotated into this frame (rotate_spin)
+#   pos = fractional position, only needed by [task.symmetry]; the element
+#         is read from the name (Co1_d -> Co).  Give the Wannier centre of the
+#         home cell R = 0 as in the hr file (e.g. -0.28, not 0.72): the cell
+#         offset enters the Bloch phase of the representation
 [shell]
-Co1_d = { start = 0,  l = 2, z = [0, 0, 1],  x = [ 0.8660254038,  0.5, 0] }
-Co2_d = { start = 10, l = 2, z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
-Co3_d = { start = 20, l = 2, z = [0, 0, 1],  x = [ 0.0,          -1.0, 0] }
-Sn1_s = { start = 30, l = 0 }
-Sn1_p = { start = 32, l = 1, z = [0, 0, 1],  x = [1, 0, 0] }
-Sn2_s = { start = 38, l = 0 }
-Sn2_p = { start = 40, l = 1, z = [0, 0, 1],  x = [1, 0, 0] }
-S1_p  = { start = 46, l = 1, z = [0, 0, -1], x = [ 0.8660254038, -0.5, 0] }
-S2_p  = { start = 52, l = 1, z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
+Co1_d = { start = 0,  l = 2, pos = [0.5, 0.0, 0.0], z = [0, 0, 1],  x = [ 0.8660254038,  0.5, 0] }
+Co2_d = { start = 10, l = 2, pos = [0.0, 0.5, 0.0], z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
+Co3_d = { start = 20, l = 2, pos = [0.0, 0.0, 0.5], z = [0, 0, 1],  x = [ 0.0,          -1.0, 0] }
+Sn1_s = { start = 30, l = 0, pos = [0.0, 0.0, 0.0] }
+Sn1_p = { start = 32, l = 1, pos = [0.0, 0.0, 0.0], z = [0, 0, 1],  x = [1, 0, 0] }
+Sn2_s = { start = 38, l = 0, pos = [0.5, 0.5, 0.5] }
+Sn2_p = { start = 40, l = 1, pos = [0.5, 0.5, 0.5], z = [0, 0, 1],  x = [1, 0, 0] }
+S1_p  = { start = 46, l = 1, pos = [0.28324, 0.28324, 0.28324], z = [0, 0, -1], x = [ 0.8660254038, -0.5, 0] }
+S2_p  = { start = 52, l = 1, pos = [0.71676, 0.71676, 0.71676], z = [0, 0, 1],  x = [-0.8660254038,  0.5, 0] }
 
 # [soc]                     # shell name = zeta (eV); not for a spinor hr
 # Co1_d = 0.07
@@ -54,6 +61,14 @@ labels = ["W", "U", "L", "G", "T"]
 nk = 200
 
 # tasks run in the order written
+[task.symmetry]                        # cheap; run first to vet the hr
+nk  = 8                                # random k-points
+tol = 1e-3                             # eV
+magmom = { Co1_d = [0, 0, 1], Co2_d = [0, 0, 1], Co3_d = [0, 0, 1] }   # -> R-3m'
+# symprec = 1e-3                       # site tolerance, Cartesian distance (lattice units)
+# time_reversal = false                # default: true without magmom
+# orbital_axes = "shell"               # "global": z/x rotate the spin only
+
 [task.udmft]
 mesh   = [12, 12, 12]
 ntot   = 43.0
@@ -62,6 +77,8 @@ shells = ["Co1_d", "Co2_d", "Co3_d"]   # consecutive, same l; one von for all
 local_basis = "eigen"                  # eigen: write eon/von/htmat ; none: identity
 save_mz   = true                       # Mz_eimp_blocked.npy
 check_tol = 1e-3                       # eV, max H_loc mismatch between shells
+# kramers = true                       # nonmagnetic SOC start only: fix each Kramers pair by Mz
+# kramers_tol = 1e-3                   # eV, max T-odd part of H_loc allowed (then symmetrised)
 
 [task.bands]
 output  = "socwan.dat"

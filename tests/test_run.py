@@ -12,12 +12,13 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-from bands import dump_projs, dump_projs_multi
-from model import Model
-import mpiutils as mpi
-import run
-
-
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # parent of the swept package
+from swept.bands import dump_projs, dump_projs_multi
+from swept.model import Model
+from swept import mpiutils as mpi
+from swept import run
 BASE = """
 [model]
 hr_file = "x_hr.dat"
@@ -228,7 +229,7 @@ class EndToEndTests(unittest.TestCase):
                 ticks = Path("bands_ticks.dat").read_text().split()
         finally:
             os.chdir(cwd)
-            mpi.bcast(None, root=0)
+            mpi.barrier()           # every rank out of the directory before rmtree
             if mpi.rank0:
                 shutil.rmtree(directory)
         if not mpi.rank0:

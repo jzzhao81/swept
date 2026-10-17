@@ -25,8 +25,9 @@ def plotbands(kpth, eigs, file='bands.pdf', dpi=100, ylim=None, ticks=None, labe
     if ticks is not None and labels is not None:
         ax.set_xticklabels(labels)
     ax.axhline(ef, linestyle='--', color='grey')
-    for tick in ticks[1:-1]:
-        ax.axvline(tick, linestyle='--', color='grey')
+    if ticks is not None:
+        for tick in ticks[1:-1]:
+            ax.axvline(tick, linestyle='--', color='grey')
     plt.savefig(file, dpi=dpi)
     return ax
 
@@ -81,10 +82,20 @@ def dump_akws(kpth, omgs, akws, fname='akws.dat'):
             fdos.write("\n")
 
 if __name__ == "__main__":
+    if __package__ in (None, ""):
+        # run as a script (python /path/to/swept/x.py): import it as part of the package
+        import importlib
+        import sys as _sys
+        from pathlib import Path as _Path
+        _pkgdir = _Path(__file__).resolve().parent
+        _sys.path.insert(0, str(_pkgdir.parent))
+        __package__ = _pkgdir.name
+        importlib.import_module(__package__)
 
-    from kpoint import Kpoint
-    from model import Model
-    import mpiutils as mpi
+
+    from .kpoint import Kpoint
+    from .model import Model
+    from . import mpiutils as mpi
     import numpy as np
     import sys
     # from basis import p2t2g, complex2real, clebsch_gordan

@@ -18,8 +18,9 @@ def plot_total_dos(omega, tdos, file='dos.pdf', dpi=100, xlim=None, ylim=None, l
         ax.set_xlim(xlim[0], xlim[1])
     if ylim is not None:
         ax.set_ylim(ylim[0], ylim[1])
-    ax.axvline( 0, linestyle='--', color='grey')
+    ax.axvline(ef, linestyle='--', color='grey')
     plt.savefig(file, dpi=dpi)
+    return ax
 
 def dump_total_dos(omega, tdos, pdos, fname, names=None):
     output_format = "{:15.9f}{:15.9f}"+"{:15.9f}"*len(pdos[0])+"\n"
@@ -30,12 +31,22 @@ def dump_total_dos(omega, tdos, pdos, fname, names=None):
             fdos.write(output_format.format(ene, tdos[img], *pdos[img]))
 
 if __name__ == "__main__":
+    if __package__ in (None, ""):
+        # run as a script (python /path/to/swept/x.py): import it as part of the package
+        import importlib
+        import sys as _sys
+        from pathlib import Path as _Path
+        _pkgdir = _Path(__file__).resolve().parent
+        _sys.path.insert(0, str(_pkgdir.parent))
+        __package__ = _pkgdir.name
+        importlib.import_module(__package__)
 
-    from kpoint import Kpoint
-    from model import Model
-    import mpiutils as mpi
+
+    from .kpoint import Kpoint
+    from .model import Model
+    from . import mpiutils as mpi
     import numpy as np
-    from basis import p2t2g, complex2real, clebsch_gordan
+    from .basis import p2t2g, complex2real, clebsch_gordan
 
     proj_list = [
         [0,1,6,7,12,13,18,19,24,25,30,31,36,37,42,43,48,49,54,55,60,61,66,67], # Ir5d J1/2

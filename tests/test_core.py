@@ -4,11 +4,15 @@ from pathlib import Path
 
 import numpy as np
 
-import mpiutils as mpi
-from bands import dump_akws
-from model import Model
-from spinor import euler_to_rmat, rmat_to_euler, rotate_spinor
-from udmft import dump_dmft, local_eigenbasis, spin_block_perm
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # parent of the swept package
+from swept import mpiutils as mpi
+from swept.bands import dump_akws
+from swept.model import Model
+from swept.spinor import euler_to_rmat, rmat_to_euler, rotate_spinor
+from swept.basis import complex2real
+from swept.udmft import dump_dmft, local_eigenbasis, spin_block_perm, time_reversal_matrix
 
 
 class ModelGeometryTests(unittest.TestCase):
@@ -231,6 +235,84 @@ class UdmftTests(unittest.TestCase):
             for ik in range(nkpt):
                 expected = vec[ik, :norb * natm, :].conj().T @ tmat
                 np.testing.assert_allclose(proj[ik], expected.T, atol=1e-11)
+
+
+def _d_shell_soc(zeta):
+    """zeta L.S of a d shell in the spin-interleaved real-harmonic basis."""
+    m = np.arange(-2, 3, dtype=float)
+    lp = np.diag(np.sqrt(6.0 - m[:-1]*(m[:-1] + 1)), -1)       # L+ in complex m
+    sp = np.array([[0.0, 1.0], [0.0, 0.0]])                      # S+ in (up, dn)
+    ls = (np.kron(np.diag(m), np.diag([0.5, -0.5]))
+          + 0.5*(np.kron(lp, sp.T) + np.kron(lp.T, sp)))
+    c2r = complex2real(2, 2)
+    return zeta * c2r.conj().T @ ls @ c2r
+
+
+class LocalBasisConventionTests(unittest.TestCase):
+    """htmat as atom_d reads it: T2C = htmat.T, T2C[a,i] = <complex_a | Eimp_i>
+    with both axes spin-blocked, so T2C^+ H_complex T2C = diag(eon[perm])."""
+
+    def assert_atomd_diagonal(self, h0, eon, htmat):
+        c2r, perm = complex2real(2, 2), spin_block_perm(5)
+        h_complex = (c2r @ h0 @ c2r.conj().T)[np.ix_(perm, perm)]
+        t2c = htmat.T
+        np.testing.assert_allclose(t2c.conj().T @ h_complex @ t2c, np.diag(eon[perm]), atol=1e-10)
+
+    def test_htmat_with_complex_soc_eigenvectors(self):
+        h0 = np.diag(np.arange(10)*0.13) + _d_shell_soc(0.1)
+        eon, von, htmat, _ = local_eigenbasis(h0, ll=2)
+        self.assertGreater(np.abs(von.imag).max(), 0.1)      # conj(von) != von here
+        self.assert_atomd_diagonal(h0, eon, htmat)
+        perm = spin_block_perm(5)
+        np.testing.assert_allclose(htmat, (complex2real(2, 2)[perm, :] @ von[:, perm]).T, atol=1e-14)
+
+    def test_htmat_random_hermitian(self):
+        h0 = _random_hermitian(10, seed=3)
+        eon, _, htmat, _ = local_eigenbasis(h0, ll=2)
+        self.assert_atomd_diagonal(h0, eon, htmat)
+
+    def nonmagnetic_soc(self):
+        # real crystal field (T-even) + SOC: only Kramers degeneracy
+        cf = np.random.default_rng(5).normal(size=(5, 5))
+        return np.kron(cf + cf.T, np.eye(2)) + _d_shell_soc(0.08)
+
+    def test_kramers_gauge(self):
+        h0 = self.nonmagnetic_soc()
+        eon, von, htmat, mz = local_eigenbasis(h0, ll=2, kramers=True)
+        theta = time_reversal_matrix(5)
+        np.testing.assert_allclose(von.conj().T @ von, np.eye(10), atol=1e-12)
+        np.testing.assert_allclose(von.conj().T @ h0 @ von, np.diag(eon), atol=1e-10)
+        np.testing.assert_allclose(von[:, 1::2], theta @ von[:, 0::2].conj(), atol=1e-10)
+        # solver order (1+, ..., 5+, 1-, ..., 5-): Mz diagonal inside every pair, + first
+        for j in range(5):
+            self.assertAlmostEqual(abs(mz[j, j + 5]), 0.0, places=10)
+            self.assertGreater(mz[j, j].real, 0.0)
+            self.assertAlmostEqual(mz[j + 5, j + 5].real, -mz[j, j].real, places=10)
+        self.assert_atomd_diagonal(h0, eon, htmat)
+
+    def test_kramers_gauge_is_unique(self):
+        # a different eigh gauge (basis rotated and back) gives the same von
+        h0 = self.nonmagnetic_soc()
+        _, von, _, _ = local_eigenbasis(h0, ll=2, kramers=True)
+        q = np.linalg.qr(np.random.default_rng(9).normal(size=(10, 10)))[0]
+        _, von2, _, _ = local_eigenbasis(q.T @ (q @ h0 @ q.T) @ q + 1e-15*np.eye(10), ll=2, kramers=True)
+        np.testing.assert_allclose(von2, von, atol=1e-8)
+
+    def test_kramers_phase_with_equal_moduli(self):
+        # t2g/eg-like degeneracies: several components of a Kramers state have
+        # exactly equal modulus, so a bare argmax phase pivot flips with roundoff
+        h0 = np.kron(np.diag([0., .5, .5, 1., 1.]), np.eye(2)) + _d_shell_soc(.08)
+        q = np.linalg.qr(np.random.default_rng(0).normal(size=(10, 10)))[0]
+        _, von, htmat, _ = local_eigenbasis(h0, ll=2, kramers=True)
+        _, von2, htmat2, _ = local_eigenbasis(q.T @ (q @ h0 @ q.T) @ q, ll=2, kramers=True)
+        np.testing.assert_allclose(von2, von, atol=1e-8)
+        np.testing.assert_allclose(htmat2, htmat, atol=1e-8)
+
+    def test_kramers_rejects_magnetic_h_loc(self):
+        h0 = self.nonmagnetic_soc() + 0.1*np.kron(np.eye(5), np.diag([1.0, -1.0]))
+        with self.assertRaises(ValueError):
+            local_eigenbasis(h0, ll=2, kramers=True)
+        local_eigenbasis(h0, ll=2)                            # plain eigh still fine
 
 
 class UtilityTests(unittest.TestCase):

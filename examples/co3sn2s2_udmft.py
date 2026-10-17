@@ -12,13 +12,13 @@ Run in the directory holding co3sn2s2_hr.dat:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # parent of the swept package
 
 import numpy as np
-import mpiutils as mpi
-from kpoint import Kpoint
-from model import Model
-from udmft import local_eigenbasis, onsite_block_mismatch, dump_local_basis, dump_dmft, dump_kpoints
+from swept import mpiutils as mpi
+from swept.kpoint import Kpoint
+from swept.model import Model
+from swept.udmft import local_eigenbasis, onsite_block_mismatch, dump_local_basis, dump_dmft, dump_kpoints
 
 np.set_printoptions(precision=3, suppress=True, linewidth=240)
 
