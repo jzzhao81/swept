@@ -211,7 +211,7 @@ class UdmftTests(unittest.TestCase):
         _, von, _, mz = local_eigenbasis(h0, ll=2)
         spin = np.where(np.argmax(np.abs(von), axis=0) % 2 == 0, 1.0, -1.0)
 
-        np.testing.assert_allclose(np.diag(mz).real, spin[spin_block_perm(5)], atol=1e-12)
+        np.testing.assert_allclose(np.diag(mz).real, spin, atol=1e-12)          # flavors interleaved
 
     def test_dump_dmft_projection(self):
         nkpt, nwan, norb, natm = 2, 6, 2, 2
@@ -250,13 +250,14 @@ def _d_shell_soc(zeta):
 
 class LocalBasisConventionTests(unittest.TestCase):
     """htmat as atom_d reads it: T2C = htmat.T, T2C[a,i] = <complex_a | Eimp_i>
-    with both axes spin-blocked, so T2C^+ H_complex T2C = diag(eon[perm])."""
+    with spin-blocked complex rows and interleaved flavor columns, so
+    T2C^+ H_complex T2C = diag(eon)."""
 
     def assert_atomd_diagonal(self, h0, eon, htmat):
         c2r, perm = complex2real(2, 2), spin_block_perm(5)
         h_complex = (c2r @ h0 @ c2r.conj().T)[np.ix_(perm, perm)]
         t2c = htmat.T
-        np.testing.assert_allclose(t2c.conj().T @ h_complex @ t2c, np.diag(eon[perm]), atol=1e-10)
+        np.testing.assert_allclose(t2c.conj().T @ h_complex @ t2c, np.diag(eon), atol=1e-10)
 
     def test_htmat_with_complex_soc_eigenvectors(self):
         h0 = np.diag(np.arange(10)*0.13) + _d_shell_soc(0.1)
@@ -264,7 +265,7 @@ class LocalBasisConventionTests(unittest.TestCase):
         self.assertGreater(np.abs(von.imag).max(), 0.1)      # conj(von) != von here
         self.assert_atomd_diagonal(h0, eon, htmat)
         perm = spin_block_perm(5)
-        np.testing.assert_allclose(htmat, (complex2real(2, 2)[perm, :] @ von[:, perm]).T, atol=1e-14)
+        np.testing.assert_allclose(htmat, (complex2real(2, 2)[perm, :] @ von).T, atol=1e-14)
 
     def test_htmat_random_hermitian(self):
         h0 = _random_hermitian(10, seed=3)
@@ -283,11 +284,11 @@ class LocalBasisConventionTests(unittest.TestCase):
         np.testing.assert_allclose(von.conj().T @ von, np.eye(10), atol=1e-12)
         np.testing.assert_allclose(von.conj().T @ h0 @ von, np.diag(eon), atol=1e-10)
         np.testing.assert_allclose(von[:, 1::2], theta @ von[:, 0::2].conj(), atol=1e-10)
-        # solver order (1+, ..., 5+, 1-, ..., 5-): Mz diagonal inside every pair, + first
+        # interleaved flavors (1+, 1-, 2+, 2-, ...): Mz diagonal inside every pair, + first
         for j in range(5):
-            self.assertAlmostEqual(abs(mz[j, j + 5]), 0.0, places=10)
-            self.assertGreater(mz[j, j].real, 0.0)
-            self.assertAlmostEqual(mz[j + 5, j + 5].real, -mz[j, j].real, places=10)
+            self.assertAlmostEqual(abs(mz[2*j, 2*j + 1]), 0.0, places=10)
+            self.assertGreater(mz[2*j, 2*j].real, 0.0)
+            self.assertAlmostEqual(mz[2*j + 1, 2*j + 1].real, -mz[2*j, 2*j].real, places=10)
         self.assert_atomd_diagonal(h0, eon, htmat)
 
     def test_kramers_gauge_is_unique(self):

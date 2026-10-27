@@ -16,6 +16,7 @@ See examples/co3sn2s2.toml for a complete input.
 
 import sys
 import math
+import hashlib
 import datetime
 import subprocess
 import warnings
@@ -246,14 +247,27 @@ def validate(cfg):
             raise InputError(f"unknown task [task.{tname}], available: {TASKS}")
         where = f"[task.{tname}]"
         if tname == "udmft":
-            _check_keys(task, where, required=("mesh", "ntot", "shells"),
-                        optional=("mu", "local_basis", "save_mz", "check_tol", "kramers", "kramers_tol"))
+            gone = [k for k in ("local_basis", "save_mz", "kramers", "kramers_tol") if k in task]
+            if gone:
+                raise InputError(f"{where} {gone} were replaced: give flavor_kind = 'kramers' or "
+                                 f"'orbital_spin' (tr_tol for the old kramers_tol); the export always "
+                                 f"writes the local basis and the dmft_basis.json manifest")
+            _check_keys(task, where, required=("mesh", "ntot", "shells", "flavor_kind"),
+                        optional=("mu", "outdir", "seed", "tr_tol", "check_tol", "deg_tol", "m_tol",
+                                  "res_tol", "spin_mix_tol", "offdiag_tol", "offdiag_warn"))
             if not _is_number(task["ntot"]) or task["ntot"] < 0:
                 raise InputError(f"{where} ntot must be a non-negative number")
-            if task.get("local_basis", "eigen") not in ("eigen", "none"):
-                raise InputError(f"{where} local_basis must be 'eigen' or 'none'")
-            if not isinstance(task.get("kramers", False), bool):
-                raise InputError(f"{where} kramers must be true or false")
+            if task["flavor_kind"] not in ("kramers", "orbital_spin"):
+                raise InputError(f"{where} flavor_kind must be 'kramers' or 'orbital_spin'")
+            for k in ("tr_tol", "check_tol", "deg_tol", "m_tol", "res_tol", "spin_mix_tol",
+                      "offdiag_tol", "offdiag_warn"):
+                if k in task and (not _is_number(task[k]) or not task[k] > 0):
+                    raise InputError(f"{where} {k} must be a positive number")
+            if "seed" in task:
+                seed = task["seed"]
+                if not isinstance(seed, dict) or set(seed) != {"delta", "beta", "max_freq", "edc"} \
+                        or not all(_is_number(v) for v in seed.values()):
+                    raise InputError(f"{where} seed must be {{delta, beta, max_freq, edc}} numbers")
         elif tname == "bands":
             _check_keys(task, where, optional=("output", "mu", "project"))
             if "kpath" not in cfg:
@@ -542,10 +556,10 @@ def mz_offdiagonal_summary(mz, kramers):
     """Size of the off-diagonal Mz elements (solver order), for the log."""
     off = np.abs(mz - np.diag(np.diag(mz)))
     text = f"max |off-diagonal Mz| = {off.max():.3e}"
-    if kramers:                                    # pair i = solver flavours (i, i + nbnd)
+    if kramers:                                    # pair k = flavours (2k, 2k + 1)
         nbnd = len(mz)//2
         pair = np.zeros_like(off, dtype=bool)
-        pair[np.arange(nbnd), np.arange(nbnd) + nbnd] = pair[np.arange(nbnd) + nbnd, np.arange(nbnd)] = True
+        pair[2*np.arange(nbnd), 2*np.arange(nbnd) + 1] = pair[2*np.arange(nbnd) + 1, 2*np.arange(nbnd)] = True
         text += (f" (inside Kramers pairs {off[pair].max():.3e}, between pairs "
                  f"{off[~pair].max() if (~pair).any() else 0.0:.3e})")
     return text + ("; m = sum_f Mz_ff n_f holds only when the off-diagonal contraction "
@@ -554,56 +568,61 @@ def mz_offdiagonal_summary(mz, kramers):
 
 
 def task_udmft(cfg, task, tbmodel, shells, log):
-    from .udmft import (local_eigenbasis, onsite_block_mismatch, dump_local_basis, dump_dmft,
-                       time_reversal_error)
+    """eig.dat, udmft.dat, Trans.dat and the dmft_basis.json manifest from one local
+    diagonalisation (UTe2/docs/PROPOSAL_interleaved_flavor_v5_2026-10-25.md, section 3)."""
+    from .udmft import build_export, write_export, DEFAULT_TOL
 
     group = [shells[name] if name in shells else None for name in task["shells"]]
     if None in group:
         raise InputError(f"[task.udmft] unknown shell in {task['shells']}")
-    l, norb, start = group[0]["l"], group[0]["size"], group[0]["start"]
-    for ish, sh in enumerate(group):
-        if sh["l"] != l or sh["start"] != start + ish*norb:
-            raise InputError("[task.udmft] shells must have the same l and be consecutive in the basis")
-    natm = len(group)
-    nspin = group[0]["nspin"]
-    mu = task.get("mu", 0.0)
-
-    von = None
-    if task.get("local_basis", "eigen") == "eigen":
-        if nspin != 2:
-            raise InputError("[task.udmft] local_basis = 'eigen' needs a spinful model")
-        h00 = tbmodel.ham[(0, 0, 0)]
-        mismatch = onsite_block_mismatch(h00, norb, natm, start=start)
-        log(f"udmft: max |H_loc(i) - H_loc(1)| = {mismatch:.3e} eV")
-        if mismatch > task.get("check_tol", 1e-3):
-            raise InputError(f"[task.udmft] correlated shells are not equivalent "
-                             f"(mismatch {mismatch:.3e} eV > check_tol); one von cannot serve all")
-        hloc = h00[start:start+norb, start:start+norb]
-        log(f"udmft: max |T H_loc T^-1 - H_loc| = {time_reversal_error(hloc):.3e} eV")
-        try:
-            eon, von, htmat, mz = local_eigenbasis(hloc, ll=l, kramers=task.get("kramers", False),
-                                                   tr_tol=task.get("kramers_tol", 1e-3))
-        except ValueError as exc:
-            raise InputError(f"[task.udmft] {exc}")
-        if task.get("kramers", False):
-            log("udmft: Kramers gauge fixed by Mz; H_loc symmetrised under T")
-        log("udmft: Eimp = " + np.array2string(eon, precision=5, max_line_width=200))
-        log("udmft: Mz per solver flavour = " + np.array2string(np.diag(mz).real, precision=4, max_line_width=200))
-        log("udmft: " + mz_offdiagonal_summary(mz, task.get("kramers", False)))
+    l = group[0]["l"]
+    used = set()
+    for sh in group:
+        if sh["l"] != l or sh["nspin"] != 2:
+            raise InputError("[task.udmft] shells must be spinful and have the same l")
+        idx = set(range(sh["start"], sh["start"] + sh["size"]))
+        if used & idx:
+            raise InputError("[task.udmft] shells overlap")
+        used |= idx
+    atoms = [dict(indices=list(range(sh["start"], sh["start"] + sh["size"])),
+                  frame=None if sh["z"] is None else dict(z=list(sh["z"]), x=list(sh["x"])),
+                  spin_rotated=sh["z"] is not None and cfg["model"]["spin"] == "spinor")
+             for sh in group]
+    tol = {k: task[k] for k in DEFAULT_TOL if k in task}
 
     kpts = Kpoint.gen_uniform_kpoints(task["mesh"])
     log(f"udmft: diagonalising {kpts.nktot} k-points")
     eigs, vecs = tbmodel.get_bulk_eigens(kpts.kfrac)
+    try:
+        data = build_export(eigs, vecs, tbmodel.ham[(0, 0, 0)], atoms, l, task["flavor_kind"],
+                            task["ntot"], task.get("mu", 0.0), tol, log)
+    except ValueError as exc:
+        raise InputError(f"[task.udmft] {exc}")
+    r = data["residuals"]
+    log(f"udmft: flavor_kind = {task['flavor_kind']}, Eimp (CIX levels, diag of E_mesh_I) = "
+        + np.array2string(data["eimp_abs"], precision=5, max_line_width=200))
+    log("udmft: residuals " + ", ".join(f"{k} = {v:.3e}" for k, v in r.items() if v is not None))
+    if data["rules"] is not None:
+        log(f"udmft: Kramers gauge rules per pair: {data['rules']}")
+    log("udmft: " + mz_offdiagonal_summary(data["mz"], task["flavor_kind"] == "kramers"))
+
+    model = cfg["model"]
+    sources = {}
+    for key, path in (("hr", model.get("hr_file")), ("wsvec", model.get("wsvec")), ("toml", cfg.get("_input_path"))):
+        if path and Path(path).is_file():
+            sources[key] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    sources["swept_udmft_py"] = hashlib.sha256(Path(__file__).with_name("udmft.py").read_bytes()).hexdigest()
+    sources["swept_run_py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    outdir = task.get("outdir", ".")
+    seed = task.get("seed")
+    box = {}
 
     def write():
-        if von is not None:
-            dump_local_basis(eon, von, htmat)
-            if task.get("save_mz", False):
-                np.save("Mz_eimp_blocked.npy", mz)
-        dump_dmft(eigs, vecs, mu, ntot=task["ntot"], norb=norb, natm=natm,
-                  lnum=l, nspin=nspin, von=von, start=start)
+        box["m"] = write_export(data, outdir, sources, seed)
     on_rank0(write, "udmft output")
-    log("udmft: wrote eig.dat, udmft.dat" + (", eon.dat, von.dat, htmat.dat" if von is not None else ""))
+    if mpi.rank0:
+        log(f"udmft: wrote eig.dat, udmft.dat, Trans.dat, eon.dat, von.dat, htmat.dat"
+            f"{', Sig.out' if seed else ''}, dmft_basis.json in {outdir} (basis_id {box['m']['basis_id']})")
 
 
 def task_bands(cfg, task, tbmodel, shells, log):
@@ -997,6 +1016,7 @@ def main(argv=None):
             f"swept {_git_version()}  nproc = {mpi.size}")
         log(f"input: {Path(path).resolve()}")
         cfg = load_input(path)
+        cfg["_input_path"] = str(Path(path).resolve())
         log.write_input(path)
 
         tbmodel, shells = build_model(cfg, log)

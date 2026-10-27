@@ -73,12 +73,13 @@ magmom = { Co1_d = [0, 0, 1], Co2_d = [0, 0, 1], Co3_d = [0, 0, 1] }   # -> R-3m
 mesh   = [12, 12, 12]
 ntot   = 43.0
 mu     = 0.0
-shells = ["Co1_d", "Co2_d", "Co3_d"]   # consecutive, same l; one von for all
-local_basis = "eigen"                  # eigen: write eon/von/htmat ; none: identity
-save_mz   = true                       # Mz_eimp_blocked.npy
-check_tol = 1e-3                       # eV, max H_loc mismatch between shells
-# kramers = true                       # nonmagnetic SOC start only: fix each Kramers pair by Mz
-# kramers_tol = 1e-3                   # eV, max T-odd part of H_loc allowed (then symmetrised)
+shells = ["Co1_d", "Co2_d", "Co3_d"]   # same l, any position in the basis; one von for all
+flavor_kind = "kramers"                # nonmagnetic SOC H_loc: Kramers pairs (2k, 2k+1);
+                                       # "orbital_spin" for a basis without SOC (atom_d Q3d=True)
+check_tol = 1e-3                       # eV, max Eimp mismatch between shells
+# tr_tol = 1e-3                        # eV, max T-odd part of the mesh Eimp (then symmetrised)
+# outdir = "dmft_input"                # eig.dat, udmft.dat, Trans.dat, dmft_basis.json, ...
+# seed = { delta = 0.1, beta = 40.0, max_freq = 500.0, edc = 26.48 }   # optional Sig.out
 
 [task.bands]
 output  = "socwan.dat"
