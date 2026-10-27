@@ -249,7 +249,7 @@ def validate(cfg):
         if tname == "udmft":
             gone = [k for k in ("local_basis", "save_mz", "kramers", "kramers_tol") if k in task]
             if gone:
-                raise InputError(f"{where} {gone} were replaced: give flavor_kind = 'kramers' or "
+                raise InputError(f"{where} {gone} were replaced: give flavor_kind = 'kramers', 'jj' or "
                                  f"'orbital_spin' (tr_tol for the old kramers_tol); the export always "
                                  f"writes the local basis and the dmft_basis.json manifest")
             _check_keys(task, where, required=("mesh", "ntot", "shells", "flavor_kind"),
@@ -257,8 +257,8 @@ def validate(cfg):
                                   "res_tol", "spin_mix_tol", "offdiag_tol", "offdiag_warn"))
             if not _is_number(task["ntot"]) or task["ntot"] < 0:
                 raise InputError(f"{where} ntot must be a non-negative number")
-            if task["flavor_kind"] not in ("kramers", "orbital_spin"):
-                raise InputError(f"{where} flavor_kind must be 'kramers' or 'orbital_spin'")
+            if task["flavor_kind"] not in ("kramers", "jj", "orbital_spin"):
+                raise InputError(f"{where} flavor_kind must be 'kramers', 'jj' or 'orbital_spin'")
             for k in ("tr_tol", "check_tol", "deg_tol", "m_tol", "res_tol", "spin_mix_tol",
                       "offdiag_tol", "offdiag_warn"):
                 if k in task and (not _is_number(task[k]) or not task[k] > 0):
@@ -603,8 +603,8 @@ def task_udmft(cfg, task, tbmodel, shells, log):
         + np.array2string(data["eimp_abs"], precision=5, max_line_width=200))
     log("udmft: residuals " + ", ".join(f"{k} = {v:.3e}" for k, v in r.items() if v is not None))
     if data["rules"] is not None:
-        log(f"udmft: Kramers gauge rules per pair: {data['rules']}")
-    log("udmft: " + mz_offdiagonal_summary(data["mz"], task["flavor_kind"] == "kramers"))
+        log(f"udmft: {'jj pairs' if task['flavor_kind'] == 'jj' else 'Kramers gauge rules per pair'}: {data['rules']}")
+    log("udmft: " + mz_offdiagonal_summary(data["mz"], task["flavor_kind"] in ("kramers", "jj")))
 
     model = cfg["model"]
     sources = {}

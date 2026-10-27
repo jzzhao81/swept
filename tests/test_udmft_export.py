@@ -128,6 +128,55 @@ class OrbitalSpinTests(unittest.TestCase):                         # TO
             udmft.orbital_spin_basis(ls_real(2, 0.1))
 
 
+def j_operators(ll):
+    """J^2 and J_z = L_z + S_z in the spin-interleaved real-harmonic basis (ladder operators, independent of jj_basis)."""
+    m = np.arange(-ll, ll+1, dtype=float)
+    lp = np.diag(np.sqrt(ll*(ll+1) - m[:-1]*(m[:-1]+1)), -1)
+    L = (0.5*(lp + lp.T), -0.5j*(lp - lp.T), np.diag(m))
+    S = (0.5*np.array([[0, 1], [1, 0]], complex), 0.5*np.array([[0, -1j], [1j, 0]]), 0.5*np.diag([1.0, -1.0]))
+    J = [np.kron(La, np.eye(2)) + np.kron(np.eye(2*ll+1), Sa) for La, Sa in zip(L, S)]
+    c2r = complex2real(ll, 2)
+    J = [c2r.conj().T @ Ja @ c2r for Ja in J]
+    return sum(Ja @ Ja for Ja in J), J[2]
+
+
+class JJBasisTests(unittest.TestCase):                                # TJ
+    def test_quantum_numbers_and_pairs(self):
+        for ll in (1, 2, 3):
+            von, labels = udmft.jj_basis(ll)
+            J2, Jz = j_operators(ll)
+            U = udmft.time_reversal_matrix(2*ll+1)
+            np.testing.assert_allclose(von.conj().T @ von, np.eye(len(von)), atol=1e-13)
+            np.testing.assert_allclose(von[:, 1::2], U @ von[:, 0::2].conj(), atol=1e-14)
+            expect = [(j2, mj2) for j2 in (2*ll-1, 2*ll+1) for mj2 in range(j2, 0, -2)]
+            self.assertEqual(labels, [f"j={j2}/2,mj=+{mj2}/2" for j2, mj2 in expect])
+            for k, (j2, mj2) in enumerate(expect):
+                for col, sign in ((2*k, 1), (2*k+1, -1)):
+                    v = von[:, col]
+                    np.testing.assert_allclose(J2 @ v, j2*(j2+2)/4*v, atol=1e-12)
+                    np.testing.assert_allclose(Jz @ v, sign*mj2/2*v, atol=1e-12)
+
+    def test_diagonalises_pure_soc(self):
+        zeta = 0.3
+        E = ls_real(3, zeta)
+        von, _ = udmft.jj_basis(3)
+        H = von.conj().T @ E @ von
+        self.assertLess(np.abs(H - np.diag(np.diag(H))).max(), 1e-13)
+        np.testing.assert_allclose(np.real(np.diag(H)), [-2*zeta]*6 + [1.5*zeta]*8, atol=1e-13)
+
+    def test_t2c_is_real_with_edmft_magnitudes(self):
+        von, _ = udmft.jj_basis(3)
+        T2C = complex2real(3, 2)[udmft.spin_block_perm(7), :] @ von  # rows: complex m = -3..3 up, then down
+        self.assertLess(np.abs(T2C.imag).max(), 1e-15)
+        v = T2C[:, 0]                                                # (5/2, +5/2): up m=2, down m=3
+        self.assertAlmostEqual(abs(v[5]), np.sqrt(1/7), places=14)
+        self.assertAlmostEqual(abs(v[7+6]), np.sqrt(6/7), places=14)
+        self.assertLess(np.abs(np.delete(v, [5, 13])).max(), 1e-15)
+        v = T2C[:, 12]                                               # (7/2, +1/2): up m=0, down m=1
+        self.assertAlmostEqual(abs(v[3]), np.sqrt(4/7), places=14)
+        self.assertAlmostEqual(abs(v[7+4]), np.sqrt(3/7), places=14)
+
+
 class RealHarmonicReferenceTests(unittest.TestCase):               # TP1, T8p
     def test_reference_is_unitary(self):
         for ll in range(4):
@@ -228,6 +277,37 @@ class ExportTests(unittest.TestCase):                               # T1E and ro
             self.assertEqual(m["basis_id"], udmft.basis_id(m))
             self.assertEqual(len(m["basis_id"]), 16)
             self.assertEqual(m["pairs"][1], [2, 3])
+
+    def test_round_trip_jj(self):
+        ll, natm = 3, 2
+        rng = np.random.default_rng(7)
+        cf = rng.normal(size=(7, 7))*0.02
+        H_shell = np.kron(np.diag(rng.uniform(0, 0.2, 7)) + cf + cf.T, np.eye(2)) + ls_real(3, 0.25)
+        H = synthetic_tb(ll, natm, 4, 5, H_shell=H_shell)
+        eigs, vecs = np.linalg.eigh(H)
+        eigs, vecs = eigs[None], vecs[None]
+        atoms = [dict(indices=list(range(a*14, a*14+14)), frame=None) for a in range(natm)]
+        logs = []
+        data = udmft.build_export(eigs, vecs, H, atoms, ll, "jj", 30.0, 0.1, log=logs.append)
+        von, labels = udmft.jj_basis(3)
+        np.testing.assert_allclose(data["von"], von, atol=0)
+        self.assertEqual(data["rules"], labels)
+        self.assertTrue(any("off-diagonal Eimp" in x for x in logs))  # the crystal field is not diagonal in jj
+        self.assertGreater(data["residuals"]["eimp_offdiag"], 1e-3)
+        self.assertLess(data["residuals"]["kramers_pair_splitting"], 1e-12)
+        with tempfile.TemporaryDirectory() as d:
+            m = udmft.write_export(data, d, dict(hr="0"*64))
+            self.assertEqual(m["flavor_kind"], "jj")
+            self.assertEqual(m["pair_rule"], labels)
+            EI = np.array([[complex(*z) for z in row] for row in m["E_mesh_I"][0]])
+            np.testing.assert_allclose(EI, von.conj().T @ H[:14, :14] @ von, atol=1e-12)
+            T2C = np.array([[complex(*z) for z in row] for row in m["T2C"]])
+            self.assertLess(np.abs(T2C.imag).max(), 1e-15)
+        with self.assertRaises(ValueError):                           # magnetic H_loc is rejected as for kramers
+            Hm = H.copy()
+            Hm[:14, :14] += 0.01*udmft.moment_operators(3)["Mz"]
+            e, v = np.linalg.eigh(Hm)
+            udmft.build_export(e[None], v[None], Hm, atoms, ll, "jj", 30.0, 0.1, log=lambda *_: None)
 
     def test_old_weights_are_not_one(self):
         self.assertGreater(abs(1728*float(f"{1/1728:15.7f}") - 1), 1e-6)   # why 17 digits are needed

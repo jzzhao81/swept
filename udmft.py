@@ -283,6 +283,43 @@ def orbital_spin_basis(E, deg_tol=1e-8, spin_mix_tol=1e-6, offdiag_tol=1e-6):
     return np.kron(V, np.eye(2))
 
 
+def jj_basis(ll):
+    """|j, m_j> of an l shell in the spin-interleaved real-harmonic basis, Kramers pairs
+    (v, Theta v) on neighbouring columns.
+
+    Pair order: j = l - 1/2 then l + 1/2, |m_j| descending inside each j (for l = 3:
+    (5/2,5/2), (5/2,3/2), (5/2,1/2), (7/2,7/2), ..., (7/2,1/2), the eDMFT component order).
+    v = |j, +|m_j|> from Condon-Shortley Clebsch-Gordan coefficients in the complex harmonics,
+    u = Theta v (proportional to |j, -|m_j|>).  The basis is fixed by symmetry and does not
+    diagonalise H_loc.  Returns (von, labels) with one label per pair."""
+    if ll < 1:
+        raise ValueError("jj basis needs l >= 1")
+    n = 2*ll + 1
+    c2r = complex2real(ll, 2)                     # rows: complex (m, spin) interleaved; columns: real
+    U = time_reversal_matrix(n)
+    cols, labels = [], []
+    for j2 in (2*ll - 1, 2*ll + 1):               # 2j
+        for mj2 in range(j2, 0, -2):              # 2 m_j > 0
+            a = np.zeros(2*n, dtype=complex)
+            mu, md = (mj2 - 1)//2, (mj2 + 1)//2   # m of the up and of the down component
+            if j2 == 2*ll + 1:
+                cu, cd = np.sqrt((2*ll + 1 + mj2)/(2*(2*ll + 1))), np.sqrt((2*ll + 1 - mj2)/(2*(2*ll + 1)))
+            else:
+                cu, cd = -np.sqrt((2*ll + 1 - mj2)/(2*(2*ll + 1))), np.sqrt((2*ll + 1 + mj2)/(2*(2*ll + 1)))
+            if abs(mu) <= ll:
+                a[2*(mu + ll)] = cu
+            if abs(md) <= ll:
+                a[2*(md + ll) + 1] = cd
+            v = c2r.conj().T @ a
+            cols += [v, _theta(U, v)]
+            labels.append(f"j={j2}/2,mj=+{mj2}/2")
+    von = np.column_stack(cols)
+    err = np.abs(von.conj().T @ von - np.eye(2*n)).max()
+    if err > 1e-12:
+        raise ValueError(f"jj basis is not unitary: {err:.2e}")
+    return von, labels
+
+
 def kramers_eigenbasis(h0, mz_r, tr_tol=1e-3):
     """Backwards-compatible wrapper: symmetrise h0 under T and call kramers_basis
     (Mz only).  Columns are interleaved pairs (v, Theta v)."""
@@ -486,19 +523,22 @@ def build_export(eigs, vecs, h00, atoms, ll, flavor_kind, ntot, mu, tol=None, lo
     ops = moment_operators(ll)
     tr_W = float(np.linalg.norm(U @ H_W[0].conj() @ U.T - H_W[0]))
 
-    if flavor_kind == "kramers":
+    if flavor_kind in ("kramers", "jj"):
         tr_max = float(np.abs(U @ H_W[0].conj() @ U.T - H_W[0]).max())
         if tr_max > tol["tr_tol"]:
             raise ValueError(f"H_mesh breaks time reversal by {tr_max:.3e} eV > tr_tol = {tol['tr_tol']}")
         E_sel = 0.5*(H_W[0] + U @ H_W[0].conj() @ U.T)
-        von, rules = kramers_basis(E_sel, U, [(k, ops[k]) for k in ("Mz", "Mx", "My")],
-                                   tol["deg_tol"], tol["m_tol"], tol["res_tol"])
+        if flavor_kind == "kramers":
+            von, rules = kramers_basis(E_sel, U, [(k, ops[k]) for k in ("Mz", "Mx", "My")],
+                                       tol["deg_tol"], tol["m_tol"], tol["res_tol"])
+        else:
+            von, rules = jj_basis(ll)
     elif flavor_kind == "orbital_spin":
         E_sel = H_W[0]
         von = orbital_spin_basis(E_sel, tol["deg_tol"], tol["spin_mix_tol"], tol["offdiag_tol"])
         rules = None
     else:
-        raise ValueError(f"flavor_kind must be 'kramers' or 'orbital_spin'; got {flavor_kind!r}")
+        raise ValueError(f"flavor_kind must be 'kramers', 'jj' or 'orbital_spin'; got {flavor_kind!r}")
 
     E_I = [von.conj().T @ h @ von for h in H_W]
     proj = [np.hstack([Q[k][a] @ von for a in range(len(idx))]) for k in range(nk)]
@@ -527,7 +567,7 @@ def build_export(eigs, vecs, h00, atoms, ll, flavor_kind, ntot, mu, tol=None, lo
     res = dict(weight_sum=None, projector_orthonormality=ortho, tr_residual_W=tr_W,
                atom_mismatch=mismatch, eimp_offdiag=off,
                mesh_vs_R0=float(np.abs(H_W[0] - H0[0]).max()))
-    if flavor_kind == "kramers":
+    if flavor_kind in ("kramers", "jj"):
         res["kramers_pair_splitting"] = float(np.abs(eimp_abs[1::2] - eimp_abs[0::2]).max())
     else:
         res["orbital_spin_offdiag"] = off
